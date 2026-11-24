@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>WhatsApp.Transport</RootNamespace>
+    <AssemblyName>WhatsApp.Transport</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WhatsApp.Protocol\WhatsApp.Protocol.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="WhatsApp.Api.Tests" />
+  </ItemGroup>
+</Project>

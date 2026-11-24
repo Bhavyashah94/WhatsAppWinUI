@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>WhatsApp.Protocol</RootNamespace>
+    <AssemblyName>WhatsApp.Protocol</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WhatsApp.WaProto\WhatsApp.WaProto.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Binary\tokens.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="WhatsApp.Protocol.Tests" />
+    <InternalsVisibleTo Include="WhatsApp.Api.Tests" />
+  </ItemGroup>
+</Project>

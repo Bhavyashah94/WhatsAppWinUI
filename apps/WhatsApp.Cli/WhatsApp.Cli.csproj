@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>WhatsApp.Cli</RootNamespace>
+    <AssemblyName>WhatsApp.Cli</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\WhatsApp.Api\WhatsApp.Api.csproj" />
+    <ProjectReference Include="..\..\src\WhatsApp.Storage.Sqlite\WhatsApp.Storage.Sqlite.csproj" />
+    <ProjectReference Include="..\..\src\WhatsApp.Transport\WhatsApp.Transport.csproj" />
+  </ItemGroup>
+</Project>
