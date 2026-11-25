@@ -16,19 +16,20 @@ apps/WhatsApp.Cli                -> Thin console/UI boundary consuming WhatsApp.
         ▼
 src/WhatsApp.Api                 -> NoiseHandshakeRunner, NoiseSessionSocket, IqClient, StanzaRouter,
                                     PairingHandler, ConnectionOrchestrator, KeepaliveWatchdog,
-                                    OfflineBatchCoordinator, PreKeyUploader, WhatsAppApiClient
+                                    OfflineBatchCoordinator, PreKeyUploader, SyncdCoordinator,
+                                    UsyncClient, ProfilePictureClient, NotificationRouter, WhatsAppApiClient
         ├──▶ src/WhatsApp.Transport       -> WhatsAppEndpointBuilder, WebSocketTransport (System.IO.Pipelines + Happy Eyeballs)
         ├──▶ src/WhatsApp.Storage.Sqlite  -> Normalized WAL SQLite backend implementing IWhatsAppBackend (unified Web + Rust schemas)
         │
         ▼
 src/WhatsApp.Protocol            -> Pure Sans-I/O protocol core (zero socket or SQLite I/O):
-                                    Binary codec/JID/Stanza builders (PairingStanzas, StreamLifecycleStanzas),
-                                    Noise XX/IK/XXfallback, XEdDSA/Curve25519, PairingCrypto (ADV),
-                                    Signal Double Ratchet & SenderKey, MediaCipher, HistorySync decoder,
-                                    AppState constants, Abstractions
+                                    Binary codec/JID/Stanza builders (Pairing, USync, Avatars, Notifications, ABProps/TcToken/MediaConn),
+                                    Noise XX/IK/XXfallback, XEdDSA/Curve25519, PairingCrypto/PairCodeCrypto/ContactHash,
+                                    Signal Double Ratchet & SenderKey, MediaCipher, HistorySync/LidPnCache,
+                                    AppState (syncd + 128B LTHash), Abstractions
         │
         ▼
-src/WhatsApp.WaProto             -> Self-contained Grpc.Tools protoc codegen from whatsapp.proto + ClientPayloadFactory
+src/WhatsApp.WaProto             -> Self-contained Grpc.Tools protoc codegen from live-synced whatsapp.proto + ClientPayloadFactory
 ```
 
 ---
@@ -43,15 +44,15 @@ src/WhatsApp.WaProto             -> Self-contained Grpc.Tools protoc codegen fro
 | **Phase 3** | Normalized WAL SQLite persistence (`WhatsApp.Storage.Sqlite`: all 6 `IWhatsAppBackend` stores unified across Web IndexedDB & Rust schemas) | Complete |
 | **Phase 4** | Correlated `IqClient`, `StanzaRouter`, QR & ADV `PairingCrypto`/`PairingHandler`, `KeepaliveWatchdog`, `OfflineBatchCoordinator`, `PreKeyUploader`, and `ConnectionOrchestrator` | Complete |
 | **Phase 5** | AppState (`syncd`) + 128B HKDF-SHA256 `LtHash` engine (`AppStateKeys`, `AppStateHasher`, `AppStateMutationCodec`, `AppStatePatchParser`, `AppStateProcessor`, `SyncdCoordinator`) | Complete |
-| **Phase 6** | Live Web `.pb` sync, Pair-by-Phone-Code, `AppStateSyncKeyShare`/dirty-bit glue, `media_conn`/`tctoken`, `<notification>` router, `@username`/`usync` | Next |
-| **Phase 7** | 1:1/group E2EE messaging, retry/PDO backfill, rich messages (reactions/edits/revokes/polls/events/pins/drafts), MMS upload/download, `HistorySync` | Planned |
+| **Phase 6** | Live Web `.pb` sync, Pair-by-Phone-Code (`PairCodeCrypto`), `AppStateSyncKeyShare`/dirty-bit glue, `media_conn`/`abprops`/`tctoken`, `<notification>` router, `@username`/`usync`, avatars | Complete |
+| **Phase 7** | 1:1/group E2EE messaging, retry/PDO backfill, rich messages (reactions/edits/revokes/polls/events/pins/drafts), MMS upload/download, `HistorySync` | Next |
 | **Phase 8** | Full Groups + Group History Sharing, Communities (`CAG` & subgroups), Statuses/Stories (`status@broadcast` & `GroupStatusV2`) | Planned |
 | **Phase 9** | Channels/Newsletters (`w:mex` & plaintext media), Business profiles/Catalogs/Labels/Quick Replies/Blocking, Meta AI/Bots | Planned |
 | **Phase 10** | VoIP & WebRTC Calling (`<call>` signaling, ICE/TURN/DTLS-SRTP media loop, group calls, call logs) | Planned |
 | **Phase 11** | End-to-end headless CLI live verification harness (`apps/WhatsApp.Cli`) | Planned |
 | **Phase 12** | Native Windows 11 WinUI 3 Desktop Client (`apps/WhatsApp.Desktop`) | Planned |
 
-See [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md) for detailed design invariants and milestone plans.
+See [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md) for detailed design invariants and milestone plans, and [`docs/LIVE_WEB_VS_RUST_DIFF.md`](docs/LIVE_WEB_VS_RUST_DIFF.md) for the running live `web.whatsapp.com` vs `whatsapp-rust` differential audit log.
 
 ---
 
