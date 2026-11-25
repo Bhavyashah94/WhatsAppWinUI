@@ -31,6 +31,7 @@ public interface ISignalStore
     ValueTask DeleteIdentityAsync(string address, CancellationToken ct = default);
 
     ValueTask<byte[]?> GetPreKeyAsync(uint preKeyId, CancellationToken ct = default);
+    ValueTask<(uint Id, byte[] KeyPairBytes)?> GetFirstPreKeyAsync(CancellationToken ct = default);
     ValueTask SavePreKeysAsync(IReadOnlyList<(uint Id, byte[] KeyPairBytes)> preKeys, CancellationToken ct = default);
     ValueTask DeletePreKeyAsync(uint preKeyId, CancellationToken ct = default);
 
@@ -41,6 +42,10 @@ public interface ISignalStore
     ValueTask<byte[]?> GetSenderKeyAsync(string groupJid, string senderAddress, CancellationToken ct = default);
     ValueTask SaveSenderKeyAsync(string groupJid, string senderAddress, byte[] recordBytes, CancellationToken ct = default);
     ValueTask DeleteSenderKeyAsync(string groupJid, string senderAddress, CancellationToken ct = default);
+
+    ValueTask<IReadOnlySet<string>> GetSenderKeyDistributedDevicesAsync(string groupJid, CancellationToken ct = default);
+    ValueTask MarkSenderKeyDistributedAsync(string groupJid, IReadOnlyList<string> deviceJids, CancellationToken ct = default);
+    ValueTask ClearSenderKeyDistributedAsync(string groupJid, string? userPrefix = null, CancellationToken ct = default);
 }
 
 /// <summary>

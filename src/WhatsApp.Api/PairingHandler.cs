@@ -410,6 +410,7 @@ public sealed class PairingHandler : IAsyncDisposable
             Jid? prevLid = _credentials.Lid;
             bool prevLidMigrated = _credentials.LidMigrated;
             string prevPushName = _credentials.PushName;
+            byte[]? prevAccountIdentity = _credentials.AccountIdentityBytes;
 
             bool accountChanged = prevPn is not { } existingPn
                 || !string.Equals(existingPn.User, primaryJid.User, StringComparison.Ordinal);
@@ -422,6 +423,7 @@ public sealed class PairingHandler : IAsyncDisposable
             _credentials.Lid = accountChanged
                 ? parsed.DeviceLidJid
                 : (parsed.DeviceLidJid ?? prevLid);
+            _credentials.AccountIdentityBytes = selfSignedBytes;
             if (lidMigratedUpdate.HasValue)
             {
                 _credentials.LidMigrated = lidMigratedUpdate.Value;
@@ -442,6 +444,7 @@ public sealed class PairingHandler : IAsyncDisposable
                 _credentials.Lid = prevLid;
                 _credentials.LidMigrated = prevLidMigrated;
                 _credentials.PushName = prevPushName;
+                _credentials.AccountIdentityBytes = prevAccountIdentity;
 
                 await _sendStanzaAsync(PairingStanzas.BuildPairError(parsed.RequestId, 500, "internal-error"), ct)
                     .ConfigureAwait(false);

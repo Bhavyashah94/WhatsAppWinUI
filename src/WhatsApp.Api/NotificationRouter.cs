@@ -20,6 +20,7 @@ public sealed class NotificationRouter
     private readonly NoiseSessionSocket _socket;
     private readonly IqClient _iqClient;
     private readonly SyncdCoordinator? _syncd;
+    private readonly MessageReceiver? _messageReceiver;
     private readonly Func<WhatsAppEvent, ValueTask> _emitEvent;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _preKeyUploadGate = new(1, 1);
@@ -32,7 +33,8 @@ public sealed class NotificationRouter
         IqClient iqClient,
         SyncdCoordinator? syncd,
         Func<WhatsAppEvent, ValueTask> emitEvent,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        MessageReceiver? messageReceiver = null)
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _lidPnCache = lidPnCache ?? throw new ArgumentNullException(nameof(lidPnCache));
@@ -40,6 +42,7 @@ public sealed class NotificationRouter
         _socket = socket ?? throw new ArgumentNullException(nameof(socket));
         _iqClient = iqClient ?? throw new ArgumentNullException(nameof(iqClient));
         _syncd = syncd;
+        _messageReceiver = messageReceiver;
         _emitEvent = emitEvent ?? throw new ArgumentNullException(nameof(emitEvent));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -92,6 +95,9 @@ public sealed class NotificationRouter
                 break;
             case "mex":
                 await HandleMexAsync(notification).ConfigureAwait(false);
+                break;
+            case "mediaretry" when _messageReceiver is not null:
+                await _messageReceiver.HandleMediaRetryNotificationAsync(notification, mediaKey32: null, handlerToken).ConfigureAwait(false);
                 break;
         }
 

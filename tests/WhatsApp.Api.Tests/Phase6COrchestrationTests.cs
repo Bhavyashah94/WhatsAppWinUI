@@ -272,7 +272,7 @@ public sealed class Phase6COrchestrationTests
         Assert.IsTrue(events.OfType<MexNotificationEvent>().Any(m => m.Operation == "NotificationLidChange"));
     }
 
-    private sealed class LocalWirePair : IAsyncDisposable
+    internal sealed class LocalWirePair : IAsyncDisposable
     {
         private readonly LoopbackTransport _transport;
         private readonly NoiseSessionCodec _serverCodec;

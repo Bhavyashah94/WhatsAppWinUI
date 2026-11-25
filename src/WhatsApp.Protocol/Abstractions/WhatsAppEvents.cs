@@ -103,3 +103,41 @@ public sealed record PrivacyTokenNotificationEvent(
     string SenderJid,
     int TokenCount,
     long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record DecryptionFailureEvent(
+    string MessageId,
+    string ChatJid,
+    string SenderJid,
+    string Reason,
+    int RetryCount,
+    bool SentRetryReceipt) : WhatsAppEvent;
+
+public sealed record MessageRetrySentEvent(
+    string MessageId,
+    string RecipientDeviceJid,
+    int RetryCount,
+    bool WasGroupResend) : WhatsAppEvent;
+
+public sealed record MediaRetryNotificationEvent(
+    string StanzaId,
+    string Status,
+    string? NewDirectPath) : WhatsAppEvent;
+
+public sealed record PresenceUpdateEvent(
+    string UserJid,
+    bool Available,
+    long? LastSeenSeconds) : WhatsAppEvent;
+
+public sealed record ChatStateEvent(
+    string ChatJid,
+    string? ParticipantJid,
+    string Activity) : WhatsAppEvent;
+
+public sealed record MessageAddOnEvent(
+    string Kind,
+    string ChatJid,
+    string SenderJid,
+    string TargetMessageId,
+    string? PayloadText,
+    bool? BoolFlag,
+    long TimestampSeconds) : WhatsAppEvent;

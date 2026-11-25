@@ -205,6 +205,24 @@ internal static class SqliteMigrations
                 created_at INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (id, device_id)
             );
+            """),
+        new(
+            Version: 3,
+            Name: "003_sender_key_devices_and_account_identity",
+            Sql: """
+            ALTER TABLE device ADD COLUMN account_identity_bytes BLOB;
+
+            CREATE TABLE IF NOT EXISTS sender_key_devices (
+                group_jid TEXT NOT NULL,
+                device_jid TEXT NOT NULL,
+                device_id INTEGER NOT NULL DEFAULT 1,
+                has_key INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (group_jid, device_jid, device_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sender_key_devices_group
+                ON sender_key_devices(group_jid, device_id);
             """)
     ];
 

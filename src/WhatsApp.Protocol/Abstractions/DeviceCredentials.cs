@@ -25,6 +25,7 @@ public sealed class DeviceCredentials
     public string PushName { get; set; } = "WhatsApp Desktop";
     public byte[]? ServerStaticPublic { get; set; }
     public byte[]? EdgeRoutingInfo { get; set; }
+    public byte[]? AccountIdentityBytes { get; set; }
 
     public bool IsRegistered => Pn != null;
 

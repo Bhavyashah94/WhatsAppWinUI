@@ -53,6 +53,14 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
     private UsyncClient? _activeUsync;
     private ProfilePictureClient? _activeProfilePictures;
     private NotificationRouter? _activeNotifications;
+    private PreKeyFetchClient? _activePreKeyFetcher;
+    private RetryCoordinator? _activeRetryCoordinator;
+    private MessageReceiver? _activeMessageReceiver;
+    private MessageSender? _activeMessageSender;
+    private PresenceClient? _activePresence;
+    private MediaTransferClient? _activeMediaTransfer;
+    private HistorySyncCoordinator? _activeHistorySync;
+    private PdoHistoryClient? _activePdoHistory;
     private long _generation;
     private int _disposed;
 
@@ -81,6 +89,14 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
     public UsyncClient? ActiveUsync => Volatile.Read(ref _activeUsync);
     public ProfilePictureClient? ActiveProfilePictures => Volatile.Read(ref _activeProfilePictures);
     public NotificationRouter? ActiveNotifications => Volatile.Read(ref _activeNotifications);
+    public PreKeyFetchClient? ActivePreKeyFetcher => Volatile.Read(ref _activePreKeyFetcher);
+    public RetryCoordinator? ActiveRetryCoordinator => Volatile.Read(ref _activeRetryCoordinator);
+    public MessageReceiver? ActiveMessageReceiver => Volatile.Read(ref _activeMessageReceiver);
+    public MessageSender? ActiveMessageSender => Volatile.Read(ref _activeMessageSender);
+    public PresenceClient? ActivePresence => Volatile.Read(ref _activePresence);
+    public MediaTransferClient? ActiveMediaTransfer => Volatile.Read(ref _activeMediaTransfer);
+    public HistorySyncCoordinator? ActiveHistorySync => Volatile.Read(ref _activeHistorySync);
+    public PdoHistoryClient? ActivePdoHistory => Volatile.Read(ref _activePdoHistory);
 
     /// <summary>
     /// Starts the managed background connect-and-reconnect loop until stopped, logged out/replaced,
@@ -278,8 +294,28 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
                 Volatile.Write(ref _activeSyncd, syncd);
             }
 
-            Volatile.Write(ref _activeUsync, new UsyncClient(iqClient, _backend, _lidPnCache, _options.TimeProvider));
+            var mediaTransfer = _options.HttpClient is { } mediaHttp
+                ? new MediaTransferClient(iqClient, mediaHttp, _options.TimeProvider)
+                : null;
+            var historySync = new HistorySyncCoordinator(_backend, _lidPnCache, mediaTransfer, EmitEventAsync);
+            var usync = new UsyncClient(iqClient, _backend, _lidPnCache, _options.TimeProvider);
+            var preKeyFetcher = new PreKeyFetchClient(iqClient, _backend, _lidPnCache, credentials);
+            var retryCoordinator = new RetryCoordinator(socket, _backend, preKeyFetcher, _lidPnCache, credentials, EmitEventAsync);
+            var messageReceiver = new MessageReceiver(socket, _backend, _lidPnCache, credentials, retryCoordinator, EmitEventAsync, _options.TimeProvider, historySync);
+            var messageSender = new MessageSender(socket, usync, preKeyFetcher, _backend, _lidPnCache, credentials, retryCoordinator, _options.TimeProvider);
+            var presenceClient = new PresenceClient(socket, _backend, credentials, EmitEventAsync);
+            var pdoHistory = new PdoHistoryClient(_backend, messageSender, credentials);
+
+            Volatile.Write(ref _activeUsync, usync);
             Volatile.Write(ref _activeProfilePictures, new ProfilePictureClient(iqClient, _backend, _options.HttpClient));
+            Volatile.Write(ref _activePreKeyFetcher, preKeyFetcher);
+            Volatile.Write(ref _activeRetryCoordinator, retryCoordinator);
+            Volatile.Write(ref _activeMessageReceiver, messageReceiver);
+            Volatile.Write(ref _activeMessageSender, messageSender);
+            Volatile.Write(ref _activePresence, presenceClient);
+            Volatile.Write(ref _activeMediaTransfer, mediaTransfer);
+            Volatile.Write(ref _activeHistorySync, historySync);
+            Volatile.Write(ref _activePdoHistory, pdoHistory);
             notifications = new NotificationRouter(
                 _backend,
                 _lidPnCache,
@@ -288,7 +324,8 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
                 iqClient,
                 syncd,
                 EmitEventAsync,
-                _options.TimeProvider);
+                _options.TimeProvider,
+                messageReceiver);
             Volatile.Write(ref _activeNotifications, notifications);
 
             KeepaliveOptions keepaliveOpts = _options.KeepaliveOptions ?? new KeepaliveOptions
@@ -503,7 +540,19 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
                 },
 
                 OnAck = (node, token) => DispatchTrafficNodeAsync(node, token, watchdog, offlineBatch, _options.ExternalHandlers?.OnAck),
-                OnReceipt = (node, token) => DispatchTrafficNodeAsync(node, token, watchdog, offlineBatch, _options.ExternalHandlers?.OnReceipt),
+                OnReceipt = (node, token) => DispatchTrafficNodeAsync(
+                    node,
+                    token,
+                    watchdog,
+                    offlineBatch,
+                    async (n, t) =>
+                    {
+                        await messageReceiver.HandleReceiptStanzaAsync(n, t).ConfigureAwait(false);
+                        if (_options.ExternalHandlers?.OnReceipt is { } extReceipt)
+                        {
+                            await extReceipt(n, t).ConfigureAwait(false);
+                        }
+                    }),
                 OnNotification = async (node, token) =>
                 {
                     watchdog.RecordDataReceived();
@@ -529,7 +578,45 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
                         await extNotif(node, token).ConfigureAwait(false);
                     }
                 },
-                OnMessage = (node, token) => DispatchTrafficNodeAsync(node, token, watchdog, offlineBatch, _options.ExternalHandlers?.OnMessage),
+                OnMessage = (node, token) => DispatchTrafficNodeAsync(
+                    node,
+                    token,
+                    watchdog,
+                    offlineBatch,
+                    async (n, t) =>
+                    {
+                        await messageReceiver.HandleMessageStanzaAsync(n, t).ConfigureAwait(false);
+                        if (_options.ExternalHandlers?.OnMessage is { } extMsg)
+                        {
+                            await extMsg(n, t).ConfigureAwait(false);
+                        }
+                    }),
+                OnPresence = (node, token) => DispatchTrafficNodeAsync(
+                    node,
+                    token,
+                    watchdog,
+                    offlineBatch,
+                    async (n, t) =>
+                    {
+                        await presenceClient.HandlePresenceStanzaAsync(n, t).ConfigureAwait(false);
+                        if (_options.ExternalHandlers?.OnPresence is { } extPres)
+                        {
+                            await extPres(n, t).ConfigureAwait(false);
+                        }
+                    }),
+                OnChatState = (node, token) => DispatchTrafficNodeAsync(
+                    node,
+                    token,
+                    watchdog,
+                    offlineBatch,
+                    async (n, t) =>
+                    {
+                        await presenceClient.HandleChatStateStanzaAsync(n, t).ConfigureAwait(false);
+                        if (_options.ExternalHandlers?.OnChatState is { } extChat)
+                        {
+                            await extChat(n, t).ConfigureAwait(false);
+                        }
+                    }),
                 OnUnhandled = (node, token) => DispatchTrafficNodeAsync(node, token, watchdog, offlineBatch, _options.ExternalHandlers?.OnUnhandled),
 
                 OnClosed = (_, fault) => routerClosedTcs.TrySetResult(fault)
@@ -565,6 +652,14 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             Volatile.Write(ref _activeUsync, null);
             Volatile.Write(ref _activeProfilePictures, null);
             Volatile.Write(ref _activeNotifications, null);
+            Volatile.Write(ref _activePreKeyFetcher, null);
+            Volatile.Write(ref _activeRetryCoordinator, null);
+            Volatile.Write(ref _activeMessageReceiver, null);
+            Volatile.Write(ref _activeMessageSender, null);
+            Volatile.Write(ref _activePresence, null);
+            Volatile.Write(ref _activeMediaTransfer, null);
+            Volatile.Write(ref _activeHistorySync, null);
+            Volatile.Write(ref _activePdoHistory, null);
             sessionStopCts.Cancel();
 
             if (watchdog is not null) await watchdog.DisposeAsync().ConfigureAwait(false);

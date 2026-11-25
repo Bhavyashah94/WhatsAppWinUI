@@ -163,6 +163,27 @@ internal sealed class SqliteSignalStore : ISignalStore
             return scalar as byte[];
         }, ct));
 
+    public ValueTask<(uint Id, byte[] KeyPairBytes)?> GetFirstPreKeyAsync(CancellationToken ct = default) =>
+        new(_runner.RunReadAsync<(uint Id, byte[] KeyPairBytes)?>(async (conn, token) =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT id, key_pair
+                FROM prekeys
+                WHERE device_id = $deviceId
+                ORDER BY id ASC
+                LIMIT 1;
+                """;
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+
+            using var reader = await cmd.ExecuteReaderAsync(token).ConfigureAwait(false);
+            if (!await reader.ReadAsync(token).ConfigureAwait(false))
+            {
+                return null;
+            }
+            return (unchecked((uint)reader.GetInt64(0)), (byte[])reader.GetValue(1));
+        }, ct));
+
     public ValueTask SavePreKeysAsync(IReadOnlyList<(uint Id, byte[] KeyPairBytes)> preKeys, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(preKeys);
@@ -326,9 +347,100 @@ internal sealed class SqliteSignalStore : ISignalStore
             cmd.CommandText = """
                 DELETE FROM sender_keys
                 WHERE group_jid = $groupJid AND sender_address = $senderAddress AND device_id = $deviceId;
+                DELETE FROM sender_key_devices
+                WHERE group_jid = $groupJid AND device_id = $deviceId;
                 """;
             cmd.Parameters.AddWithValue("$groupJid", groupJid);
             cmd.Parameters.AddWithValue("$senderAddress", senderAddress);
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, ct));
+    }
+
+    public ValueTask<IReadOnlySet<string>> GetSenderKeyDistributedDevicesAsync(string groupJid, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(groupJid);
+        return new(_runner.RunReadAsync<IReadOnlySet<string>>(async (conn, token) =>
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT device_jid
+                FROM sender_key_devices
+                WHERE group_jid = $groupJid AND device_id = $deviceId AND has_key = 1;
+                """;
+            cmd.Parameters.AddWithValue("$groupJid", groupJid);
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+
+            using var reader = await cmd.ExecuteReaderAsync(token).ConfigureAwait(false);
+            while (await reader.ReadAsync(token).ConfigureAwait(false))
+            {
+                set.Add(reader.GetString(0));
+            }
+            return set;
+        }, ct));
+    }
+
+    public ValueTask MarkSenderKeyDistributedAsync(string groupJid, IReadOnlyList<string> deviceJids, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(groupJid);
+        ArgumentNullException.ThrowIfNull(deviceJids);
+        if (deviceJids.Count == 0)
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        return new(_runner.RunWriteTransactionAsync(async (conn, token) =>
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO sender_key_devices (group_jid, device_jid, device_id, has_key, updated_at)
+                VALUES ($groupJid, $deviceJid, $deviceId, 1, $updatedAt)
+                ON CONFLICT(group_jid, device_jid, device_id) DO UPDATE SET
+                    has_key = 1,
+                    updated_at = excluded.updated_at;
+                """;
+            cmd.Parameters.AddWithValue("$groupJid", groupJid);
+            var devParam = cmd.Parameters.Add("$deviceJid", Microsoft.Data.Sqlite.SqliteType.Text);
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            cmd.Parameters.AddWithValue("$updatedAt", now);
+
+            foreach (string d in deviceJids)
+            {
+                if (!string.IsNullOrWhiteSpace(d))
+                {
+                    devParam.Value = d;
+                    await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+                }
+            }
+        }, ct));
+    }
+
+    public ValueTask ClearSenderKeyDistributedAsync(string groupJid, string? userPrefix = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(groupJid);
+        return new(_runner.RunWriteTransactionAsync(async (conn, token) =>
+        {
+            using var cmd = conn.CreateCommand();
+            if (string.IsNullOrEmpty(userPrefix))
+            {
+                cmd.CommandText = """
+                    DELETE FROM sender_key_devices
+                    WHERE group_jid = $groupJid AND device_id = $deviceId;
+                    """;
+            }
+            else
+            {
+                cmd.CommandText = """
+                    DELETE FROM sender_key_devices
+                    WHERE group_jid = $groupJid AND device_id = $deviceId
+                      AND (device_jid LIKE $colonPrefix OR device_jid LIKE $atPrefix);
+                    """;
+                cmd.Parameters.AddWithValue("$colonPrefix", $"{userPrefix}:%");
+                cmd.Parameters.AddWithValue("$atPrefix", $"{userPrefix}@%");
+            }
+            cmd.Parameters.AddWithValue("$groupJid", groupJid);
             cmd.Parameters.AddWithValue("$deviceId", _deviceId);
             await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, ct));
