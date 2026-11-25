@@ -15,6 +15,7 @@ public sealed class DeviceCredentials
     public KeyPair SignedPreKey { get; set; }
     public byte[] SignedPreKeySignature { get; set; } = [];
     public uint SignedPreKeyId { get; set; } = 1;
+    public uint NextPreKeyId { get; set; } = 1;
     public uint RegistrationId { get; set; }
     public byte[] AdvSecretKey { get; set; } = [];
 

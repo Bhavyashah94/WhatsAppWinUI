@@ -129,4 +129,29 @@ public sealed class PreKeyManagerAndCodecTests
         byte[] g2 = SenderKeyCipher.Encrypt(reloadedSender, "grp-2-after-restart"u8);
         CollectionAssert.AreEqual("grp-2-after-restart"u8.ToArray(), SenderKeyCipher.Decrypt(reloadedReceiver, g2));
     }
+
+    [TestMethod]
+    public void SignalStateCodec_EmitsRecordStructureAndAcceptsTaggedOrLegacySessionStructure()
+    {
+        var aliceId = Curve25519.GenerateKeyPair();
+        var bobId = Curve25519.GenerateKeyPair();
+        var bobSpk = PreKeyManager.CreateSignedPreKey(19, bobId);
+        var bundle = new PreKeyBundle(1111, 0, bobSpk.Id, bobSpk.KeyPair.PublicKey, bobSpk.Signature, bobId.PublicKey);
+
+        SignalSession session = SignalCipher.InitiateSession(bundle, aliceId, 2222);
+        byte[] encoded = SignalStateCodec.SerializeSession(session);
+
+        // Verify canonical RecordStructure envelope parses cleanly
+        var recordProto = global::Whatsapp.RecordStructure.Parser.ParseFrom(encoded);
+        Assert.IsNotNull(recordProto.CurrentSession);
+
+        // Legacy bare SessionStructure with 0x05-tagged 33B Curve25519 keys still deserializes cleanly
+        var taggedBare = recordProto.CurrentSession.Clone();
+        taggedBare.LocalIdentityPublic = Google.Protobuf.ByteString.CopyFrom(PreKeySignalMessage.TagKey(aliceId.PublicKey));
+        taggedBare.RemoteIdentityPublic = Google.Protobuf.ByteString.CopyFrom(PreKeySignalMessage.TagKey(bobId.PublicKey));
+        SignalSession fromLegacy = SignalStateCodec.DeserializeSession(Google.Protobuf.MessageExtensions.ToByteArray(taggedBare));
+
+        CollectionAssert.AreEqual(aliceId.PublicKey, fromLegacy.LocalIdentity);
+        CollectionAssert.AreEqual(bobId.PublicKey, fromLegacy.RemoteIdentity);
+    }
 }

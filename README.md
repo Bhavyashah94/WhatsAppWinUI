@@ -14,15 +14,18 @@ The solution follows a strict **Sans-I/O protocol boundary** with Central Packag
 apps/WhatsApp.Cli                -> Thin console/UI boundary consuming WhatsApp.Api
         │
         ▼
-src/WhatsApp.Api                 -> NoiseHandshakeRunner, NoiseSessionSocket (single-writer Channel<T>), WhatsAppApiClient
+src/WhatsApp.Api                 -> NoiseHandshakeRunner, NoiseSessionSocket, IqClient, StanzaRouter,
+                                    PairingHandler, ConnectionOrchestrator, KeepaliveWatchdog,
+                                    OfflineBatchCoordinator, PreKeyUploader, WhatsAppApiClient
         ├──▶ src/WhatsApp.Transport       -> WhatsAppEndpointBuilder, WebSocketTransport (System.IO.Pipelines + Happy Eyeballs)
         ├──▶ src/WhatsApp.Storage.Sqlite  -> Normalized WAL SQLite backend implementing IWhatsAppBackend (unified Web + Rust schemas)
         │
         ▼
 src/WhatsApp.Protocol            -> Pure Sans-I/O protocol core (zero socket or SQLite I/O):
-                                    Binary codec/JID/Stanza builders, Noise XX/IK/XXfallback,
-                                    XEdDSA/Curve25519, Signal Double Ratchet & SenderKey,
-                                    MediaCipher, HistorySync decoder, AppState constants, Abstractions
+                                    Binary codec/JID/Stanza builders (PairingStanzas, StreamLifecycleStanzas),
+                                    Noise XX/IK/XXfallback, XEdDSA/Curve25519, PairingCrypto (ADV),
+                                    Signal Double Ratchet & SenderKey, MediaCipher, HistorySync decoder,
+                                    AppState constants, Abstractions
         │
         ▼
 src/WhatsApp.WaProto             -> Self-contained Grpc.Tools protoc codegen from whatsapp.proto + ClientPayloadFactory
@@ -38,7 +41,7 @@ src/WhatsApp.WaProto             -> Self-contained Grpc.Tools protoc codegen fro
 | **Phase 1** | Happy Eyeballs dialer (`WhatsAppEndpointBuilder`), `System.IO.Pipelines` `WebSocketTransport`, `NoiseHandshakeRunner` (`XX`/`IK`/`XXfallback`), `NoiseSessionSocket` | Complete |
 | **Phase 2** | Signal X3DH + bidirectional Double Ratchet (`SignalCipher`/`SignalSession`), group `SenderKeyCipher`, `PreKeyManager`, `SignalStateCodec` | Complete |
 | **Phase 3** | Normalized WAL SQLite persistence (`WhatsApp.Storage.Sqlite`: all 6 `IWhatsAppBackend` stores unified across Web IndexedDB & Rust schemas) | Complete |
-| **Phase 4** | Correlated IQ table, Stanza Router, QR/`IK` cold-boot orchestration | Planned |
+| **Phase 4** | Correlated `IqClient`, `StanzaRouter`, QR & ADV `PairingCrypto`/`PairingHandler`, `KeepaliveWatchdog`, `OfflineBatchCoordinator`, `PreKeyUploader`, and `ConnectionOrchestrator` | Complete |
 | **Phase 5** | AppState (`syncd`) + 128B HKDF-SHA512 `LtHash` engine | Planned |
 | **Phase 6** | End-to-end 1:1/group messaging, Media pipeline, on-demand PDO backfill | Planned |
 | **Phase 7+** | End-to-end CLI verification & native WinUI 3 client | Planned |

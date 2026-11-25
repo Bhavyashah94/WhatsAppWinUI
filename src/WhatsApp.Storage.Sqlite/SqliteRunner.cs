@@ -14,6 +14,7 @@ internal sealed class SqliteRunner
     private readonly string _connectionString;
     private readonly bool _isMemoryDatabase;
     private readonly SemaphoreSlim _initGate = new(1, 1);
+    private SqliteConnection? _memoryAnchorConnection;
     private volatile bool _initialized;
 
     public SqliteRunner(SqliteOptions options)
@@ -36,13 +37,21 @@ internal sealed class SqliteRunner
             }
         }
 
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = options.DatabasePath,
-            Mode = SqliteOpenMode.ReadWriteCreate,
-            Pooling = !_isMemoryDatabase,
-            Cache = SqliteCacheMode.Private
-        };
+        var builder = _isMemoryDatabase
+            ? new SqliteConnectionStringBuilder
+            {
+                DataSource = $"whatsapp_mem_{Guid.NewGuid():N}",
+                Mode = SqliteOpenMode.Memory,
+                Cache = SqliteCacheMode.Shared,
+                Pooling = false
+            }
+            : new SqliteConnectionStringBuilder
+            {
+                DataSource = options.DatabasePath,
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Pooling = true,
+                Cache = SqliteCacheMode.Private
+            };
         _connectionString = builder.ToString();
     }
 
@@ -59,6 +68,11 @@ internal sealed class SqliteRunner
             if (_initialized)
             {
                 return;
+            }
+
+            if (_isMemoryDatabase && _memoryAnchorConnection is null)
+            {
+                _memoryAnchorConnection = await OpenConfiguredConnectionAsync(configureJournalMode: false, ct).ConfigureAwait(false);
             }
 
             await using var conn = await OpenConfiguredConnectionAsync(configureJournalMode: true, ct).ConfigureAwait(false);
@@ -190,6 +204,8 @@ internal sealed class SqliteRunner
 
     public void Dispose()
     {
+        _memoryAnchorConnection?.Dispose();
+        _memoryAnchorConnection = null;
         SqliteConnection.ClearAllPools();
         _initGate.Dispose();
     }

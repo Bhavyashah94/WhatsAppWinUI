@@ -31,6 +31,31 @@ public static class PingIq
 
     public static Node BuildPing(string iqId) =>
         StanzaBuilder.Iq(iqId, "get", Xmlns, StanzaBuilder.ServerPn);
+
+    public static bool IsPingRequest(Node iqNode) =>
+        iqNode.Tag == "iq"
+        && string.Equals(iqNode.GetAttr("type"), "get", StringComparison.Ordinal)
+        && string.Equals(iqNode.GetAttr("xmlns"), Xmlns, StringComparison.Ordinal);
+
+    public static Node BuildPong(Node pingRequest)
+    {
+        ArgumentNullException.ThrowIfNull(pingRequest);
+        string? fromAttr = pingRequest.GetAttr("from");
+        Jid to = !string.IsNullOrEmpty(fromAttr) && Jid.TryParse(fromAttr, out var parsed)
+            ? parsed
+            : StanzaBuilder.ServerPn;
+
+        var attrs = new Dictionary<string, NodeValue>(StringComparer.Ordinal)
+        {
+            ["to"] = to,
+            ["type"] = "result"
+        };
+        if (pingRequest.GetAttr("id") is { Length: > 0 } id)
+        {
+            attrs["id"] = id;
+        }
+        return new Node("iq", attrs);
+    }
 }
 
 /// <summary>

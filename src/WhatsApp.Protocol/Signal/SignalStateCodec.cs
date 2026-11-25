@@ -5,7 +5,7 @@ using WhatsApp.Protocol.Noise;
 namespace WhatsApp.Protocol.Signal;
 
 /// <summary>
-/// Protobuf persistence codecs for <see cref="SignalSession"/> (<see cref="SessionStructure"/>)
+/// Protobuf persistence codecs for <see cref="SignalSession"/> (<see cref="RecordStructure"/> / <see cref="SessionStructure"/>)
 /// and <see cref="SenderKeyRecord"/> (<see cref="SenderKeyRecordStructure"/>).
 /// </summary>
 public static class SignalStateCodec
@@ -104,22 +104,44 @@ public static class SignalStateCodec
             proto.ReceiverChains.Add(chainProto);
         }
 
-        return proto.ToByteArray();
+        return new RecordStructure
+        {
+            CurrentSession = proto
+        }.ToByteArray();
     }
 
     public static SignalSession DeserializeSession(ReadOnlySpan<byte> bytes)
     {
-        var proto = SessionStructure.Parser.ParseFrom(bytes);
+        if (bytes.IsEmpty)
+        {
+            throw new InvalidDataException("Empty Signal session bytes.");
+        }
+
+        // Canonical format wraps SessionStructure inside RecordStructure (field 1, wire type 2 = 0x0A);
+        // keep bare SessionStructure fallback (field 1, varint 0x08) for backwards compatibility.
+        SessionStructure proto;
+        if (bytes[0] != 0x08)
+        {
+            var record = RecordStructure.Parser.ParseFrom(bytes);
+            proto = record.CurrentSession
+                ?? throw new InvalidDataException("RecordStructure is missing currentSession.");
+        }
+        else
+        {
+            proto = SessionStructure.Parser.ParseFrom(bytes);
+        }
         var session = new SignalSession
         {
             Version = (byte)(proto.HasSessionVersion ? proto.SessionVersion : 3),
             LocalRegistrationId = proto.LocalRegistrationId,
             RemoteRegistrationId = proto.RemoteRegistrationId,
-            LocalIdentity = proto.LocalIdentityPublic.ToByteArray(),
-            RemoteIdentity = proto.RemoteIdentityPublic.ToByteArray(),
+            LocalIdentity = PreKeySignalMessage.StripKeyPrefix(proto.LocalIdentityPublic.ToByteArray()),
+            RemoteIdentity = PreKeySignalMessage.StripKeyPrefix(proto.RemoteIdentityPublic.ToByteArray()),
             RootKey = proto.RootKey.ToByteArray(),
             PreviousSendCounter = proto.PreviousCounter,
-            AliceBaseKey = proto.HasAliceBaseKey ? proto.AliceBaseKey.ToByteArray() : null
+            AliceBaseKey = proto.HasAliceBaseKey
+                ? PreKeySignalMessage.StripKeyPrefix(proto.AliceBaseKey.ToByteArray())
+                : null
         };
 
         if (proto.PendingPreKey is { } pending)
@@ -127,7 +149,7 @@ public static class SignalStateCodec
             session.PendingPreKey = new PendingPreKeyInfo(
                 pending.HasPreKeyId ? pending.PreKeyId : null,
                 unchecked((uint)pending.SignedPreKeyId),
-                pending.BaseKey.ToByteArray());
+                PreKeySignalMessage.StripKeyPrefix(pending.BaseKey.ToByteArray()));
         }
 
         if (proto.SenderChain is { } sender)
@@ -136,7 +158,7 @@ public static class SignalStateCodec
             {
                 RatchetKeyPair = new KeyPair(
                     sender.SenderRatchetKeyPrivate.ToByteArray(),
-                    sender.SenderRatchetKey.ToByteArray()),
+                    PreKeySignalMessage.StripKeyPrefix(sender.SenderRatchetKey.ToByteArray())),
                 ChainKey = sender.ChainKey?.Key.ToByteArray() ?? [],
                 Index = sender.ChainKey?.Index ?? 0
             };
@@ -144,7 +166,7 @@ public static class SignalStateCodec
 
         foreach (var recvProto in proto.ReceiverChains)
         {
-            byte[] ratchetPub = recvProto.SenderRatchetKey.ToByteArray();
+            byte[] ratchetPub = PreKeySignalMessage.StripKeyPrefix(recvProto.SenderRatchetKey.ToByteArray());
             session.ReceiverChains.Add(new SignalReceivingChain
             {
                 RatchetPublicKey = ratchetPub,

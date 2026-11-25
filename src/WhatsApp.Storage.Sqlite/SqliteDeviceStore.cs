@@ -53,6 +53,7 @@ internal sealed class SqliteDeviceStore : IDeviceStore
                         lid_migrated = 0,
                         server_static_public = NULL,
                         edge_routing_info = NULL,
+                        next_pre_key_id = 1,
                         updated_at = $updatedAt
                     WHERE id = $id;
                     """;
@@ -99,7 +100,8 @@ internal sealed class SqliteDeviceStore : IDeviceStore
                    adv_secret_key,
                    push_name,
                    server_static_public,
-                   edge_routing_info
+                   edge_routing_info,
+                   next_pre_key_id
             FROM device
             WHERE id = $id;
             """;
@@ -128,7 +130,8 @@ internal sealed class SqliteDeviceStore : IDeviceStore
             AdvSecretKey = (byte[])reader.GetValue(9),
             PushName = reader.GetString(10),
             ServerStaticPublic = reader.IsDBNull(11) ? null : (byte[])reader.GetValue(11),
-            EdgeRoutingInfo = reader.IsDBNull(12) ? null : (byte[])reader.GetValue(12)
+            EdgeRoutingInfo = reader.IsDBNull(12) ? null : (byte[])reader.GetValue(12),
+            NextPreKeyId = unchecked((uint)Math.Max(1, reader.GetInt64(13)))
         };
     }
 
@@ -151,6 +154,7 @@ internal sealed class SqliteDeviceStore : IDeviceStore
                 push_name,
                 server_static_public,
                 edge_routing_info,
+                next_pre_key_id,
                 updated_at
             )
             VALUES (
@@ -168,6 +172,7 @@ internal sealed class SqliteDeviceStore : IDeviceStore
                 $pushName,
                 $serverStaticPublic,
                 $edgeRoutingInfo,
+                $nextPreKeyId,
                 $updatedAt
             )
             ON CONFLICT(id) DO UPDATE SET
@@ -184,6 +189,7 @@ internal sealed class SqliteDeviceStore : IDeviceStore
                 push_name = excluded.push_name,
                 server_static_public = excluded.server_static_public,
                 edge_routing_info = excluded.edge_routing_info,
+                next_pre_key_id = excluded.next_pre_key_id,
                 updated_at = excluded.updated_at;
             """;
 
@@ -201,6 +207,7 @@ internal sealed class SqliteDeviceStore : IDeviceStore
         cmd.Parameters.AddWithValue("$pushName", credentials.PushName ?? string.Empty);
         cmd.Parameters.AddWithValue("$serverStaticPublic", (object?)credentials.ServerStaticPublic ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$edgeRoutingInfo", (object?)credentials.EdgeRoutingInfo ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$nextPreKeyId", unchecked((long)Math.Max(1U, credentials.NextPreKeyId)));
         cmd.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
