@@ -42,7 +42,7 @@ src/WhatsApp.WaProto             -> Self-contained Grpc.Tools protoc codegen fro
 | **Phase 2** | Signal X3DH + bidirectional Double Ratchet (`SignalCipher`/`SignalSession`), group `SenderKeyCipher`, `PreKeyManager`, `SignalStateCodec` | Complete |
 | **Phase 3** | Normalized WAL SQLite persistence (`WhatsApp.Storage.Sqlite`: all 6 `IWhatsAppBackend` stores unified across Web IndexedDB & Rust schemas) | Complete |
 | **Phase 4** | Correlated `IqClient`, `StanzaRouter`, QR & ADV `PairingCrypto`/`PairingHandler`, `KeepaliveWatchdog`, `OfflineBatchCoordinator`, `PreKeyUploader`, and `ConnectionOrchestrator` | Complete |
-| **Phase 5** | AppState (`syncd`) + 128B HKDF-SHA512 `LtHash` engine | Planned |
+| **Phase 5** | AppState (`syncd`) + 128B HKDF-SHA256 `LtHash` engine (`AppStateKeys`, `AppStateHasher`, `AppStateMutationCodec`, `AppStatePatchParser`, `AppStateProcessor`, `SyncdCoordinator`) | Complete |
 | **Phase 6** | End-to-end 1:1/group messaging, Media pipeline, on-demand PDO backfill | Planned |
 | **Phase 7+** | End-to-end CLI verification & native WinUI 3 client | Planned |
 

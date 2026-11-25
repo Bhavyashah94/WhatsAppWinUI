@@ -40,9 +40,16 @@ public interface ISignalStore
 public interface IAppSyncStore
 {
     ValueTask<byte[]?> GetSyncKeyAsync(byte[] keyId, CancellationToken ct = default);
+    ValueTask<byte[]?> GetLatestSyncKeyIdAsync(CancellationToken ct = default);
     ValueTask SaveSyncKeyAsync(byte[] keyId, byte[] keyData, CancellationToken ct = default);
 
     ValueTask<(ulong Version, byte[] LtHash)> GetCollectionStateAsync(string collection, CancellationToken ct = default);
+    ValueTask CommitSnapshotAsync(
+        string collection,
+        ulong newVersion,
+        byte[] newLtHash,
+        IReadOnlyList<(byte[] IndexMac, byte[] ValueMac)> macs,
+        CancellationToken ct = default);
     ValueTask CommitPatchAsync(
         string collection,
         ulong newVersion,
