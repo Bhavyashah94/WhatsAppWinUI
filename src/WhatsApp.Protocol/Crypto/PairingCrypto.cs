@@ -61,6 +61,7 @@ public static class PairingCrypto
 
     private static ReadOnlySpan<byte> PrefixAccountSignature => [0x06, 0x00];
     private static ReadOnlySpan<byte> PrefixDeviceSignature => [0x06, 0x01];
+    private static ReadOnlySpan<byte> PrefixKeyIndexListAccountSignature => [0x06, 0x02];
     private static ReadOnlySpan<byte> PrefixHostedAccountSignature => [0x06, 0x05];
     private static ReadOnlySpan<byte> PrefixHostedDeviceSignature => [0x06, 0x06];
 
@@ -397,6 +398,152 @@ public static class PairingCrypto
             companionIdentityPublicKey32,
             accountKey);
         return XEdDSA.Verify(companionIdentityPublicKey32.ToArray(), deviceMsg, deviceSig);
+    }
+
+    public sealed record DecodedKeyIndexList(
+        uint RawId,
+        ulong Timestamp,
+        uint CurrentIndex,
+        IReadOnlyList<uint> ValidIndexes,
+        ADVEncryptionType AccountType);
+
+    /// <summary>
+    /// Decodes <see cref="ADVSignedKeyIndexList"/> without verifying its signature.
+    /// Network callers must prefer <see cref="VerifyKeyIndexList"/> or <see cref="VerifyHostedKeyIndexList"/>.
+    /// </summary>
+    public static DecodedKeyIndexList? DecodeKeyIndexList(ReadOnlySpan<byte> signedKeyIndexBytes)
+    {
+        if (signedKeyIndexBytes.IsEmpty)
+        {
+            return null;
+        }
+
+        try
+        {
+            ADVSignedKeyIndexList signed = ADVSignedKeyIndexList.Parser.ParseFrom(signedKeyIndexBytes);
+            if (!signed.HasDetails || signed.Details.IsEmpty)
+            {
+                return null;
+            }
+
+            ADVKeyIndexList keyIndex = ADVKeyIndexList.Parser.ParseFrom(signed.Details);
+            if (!keyIndex.HasRawId || !keyIndex.HasTimestamp)
+            {
+                return null;
+            }
+
+            return new DecodedKeyIndexList(
+                keyIndex.RawId,
+                keyIndex.Timestamp,
+                keyIndex.HasCurrentIndex ? keyIndex.CurrentIndex : 0u,
+                keyIndex.ValidIndexes.ToArray(),
+                keyIndex.HasAccountType ? keyIndex.AccountType : ADVEncryptionType.E2Ee);
+        }
+        catch (InvalidProtocolBufferException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Authenticates <see cref="ADVSignedKeyIndexList"/> against a trusted primary account identity key.
+    /// Matches live <c>WAWebAdvKeyIndexSignatureVerify</c> (<c>[0x06, 0x02] || details</c>).
+    /// </summary>
+    public static DecodedKeyIndexList? VerifyKeyIndexList(
+        ReadOnlySpan<byte> signedKeyIndexBytes,
+        ReadOnlySpan<byte> accountIdentityPublicKey32)
+    {
+        if (signedKeyIndexBytes.IsEmpty || accountIdentityPublicKey32.Length != 32)
+        {
+            return null;
+        }
+
+        try
+        {
+            ADVSignedKeyIndexList signed = ADVSignedKeyIndexList.Parser.ParseFrom(signedKeyIndexBytes);
+            if (!signed.HasDetails || signed.Details.IsEmpty || !signed.HasAccountSignature || signed.AccountSignature.Length != 64)
+            {
+                return null;
+            }
+
+            byte[] message = ConcatSegments(PrefixKeyIndexListAccountSignature, signed.Details.Span, ReadOnlySpan<byte>.Empty);
+            if (!XEdDSA.Verify(accountIdentityPublicKey32.ToArray(), message, signed.AccountSignature.ToByteArray()))
+            {
+                return null;
+            }
+
+            return DecodeKeyIndexList(signedKeyIndexBytes);
+        }
+        catch (InvalidProtocolBufferException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Authenticates a hosted/coex <see cref="ADVSignedKeyIndexList"/> using its embedded
+    /// <see cref="ADVSignedKeyIndexList.AccountSignatureKey"/> (only use for hosted branches).
+    /// </summary>
+    public static DecodedKeyIndexList? VerifyHostedKeyIndexList(
+        ReadOnlySpan<byte> signedKeyIndexBytes,
+        out byte[]? envelopeAccountIdentityPublicKey32)
+    {
+        envelopeAccountIdentityPublicKey32 = null;
+        if (signedKeyIndexBytes.IsEmpty)
+        {
+            return null;
+        }
+
+        try
+        {
+            ADVSignedKeyIndexList signed = ADVSignedKeyIndexList.Parser.ParseFrom(signedKeyIndexBytes);
+            if (!signed.HasAccountSignatureKey || signed.AccountSignatureKey.Length != 32)
+            {
+                return null;
+            }
+
+            byte[] accountPub = signed.AccountSignatureKey.ToByteArray();
+            DecodedKeyIndexList? decoded = VerifyKeyIndexList(signedKeyIndexBytes, accountPub);
+            if (decoded is null)
+            {
+                return null;
+            }
+
+            envelopeAccountIdentityPublicKey32 = accountPub;
+            return decoded;
+        }
+        catch (InvalidProtocolBufferException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Creates an XEdDSA-signed <see cref="ADVSignedKeyIndexList"/> blob for tests and tooling.
+    /// </summary>
+    public static byte[] SignKeyIndexList(
+        ReadOnlySpan<byte> accountIdentityPrivateKey32,
+        ADVKeyIndexList list,
+        ReadOnlySpan<byte> accountIdentityPublicKey32 = default)
+    {
+        ValidateKeyLength(accountIdentityPrivateKey32, nameof(accountIdentityPrivateKey32));
+        ArgumentNullException.ThrowIfNull(list);
+
+        byte[] details = list.ToByteArray();
+        byte[] message = ConcatSegments(PrefixKeyIndexListAccountSignature, details, ReadOnlySpan<byte>.Empty);
+        byte[] signature = XEdDSA.Sign(accountIdentityPrivateKey32.ToArray(), message);
+
+        var signed = new ADVSignedKeyIndexList
+        {
+            Details = ByteString.CopyFrom(details),
+            AccountSignature = ByteString.CopyFrom(signature),
+        };
+        if (accountIdentityPublicKey32.Length == 32)
+        {
+            signed.AccountSignatureKey = ByteString.CopyFrom(accountIdentityPublicKey32);
+        }
+
+        return signed.ToByteArray();
     }
 
     internal static byte[] ComputeAdvContainerHmac(

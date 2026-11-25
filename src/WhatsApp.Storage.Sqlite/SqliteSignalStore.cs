@@ -71,6 +71,26 @@ internal sealed class SqliteSignalStore : ISignalStore
         }, ct));
     }
 
+    public ValueTask DeleteSessionsByUserAsync(string user, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(user);
+        return new(_runner.RunWriteTransactionAsync(async (conn, token) =>
+        {
+            using var cmd = conn.CreateCommand();
+            // Matches bare user (`user@server`) and device-suffixed (`user:device@server`) or Signal `user.0` forms.
+            cmd.CommandText = """
+                DELETE FROM signal_sessions
+                WHERE device_id = $deviceId
+                  AND (address LIKE $colonPrefix OR address LIKE $dotPrefix OR address LIKE $atPrefix);
+                """;
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            cmd.Parameters.AddWithValue("$colonPrefix", $"{user}:%@%");
+            cmd.Parameters.AddWithValue("$dotPrefix", $"{user}.%");
+            cmd.Parameters.AddWithValue("$atPrefix", $"{user}@%");
+            await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, ct));
+    }
+
     public ValueTask<byte[]?> GetIdentityAsync(string address, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(address);
@@ -107,6 +127,22 @@ internal sealed class SqliteSignalStore : ISignalStore
             cmd.Parameters.AddWithValue("$address", address);
             cmd.Parameters.AddWithValue("$deviceId", _deviceId);
             cmd.Parameters.AddWithValue("$identityKey", identityKey);
+            await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, ct));
+    }
+
+    public ValueTask DeleteIdentityAsync(string address, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(address);
+        return new(_runner.RunWriteTransactionAsync(async (conn, token) =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                DELETE FROM signal_identities
+                WHERE address = $address AND device_id = $deviceId;
+                """;
+            cmd.Parameters.AddWithValue("$address", address);
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
             await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, ct));
     }
@@ -170,6 +206,70 @@ internal sealed class SqliteSignalStore : ISignalStore
             await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, ct));
 
+    public ValueTask<SignedPreKeyEntry?> GetSignedPreKeyAsync(uint signedPreKeyId, CancellationToken ct = default) =>
+        new(_runner.RunReadAsync(async (conn, token) =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT key_pair, signature, created_at
+                FROM signed_prekeys
+                WHERE id = $id AND device_id = $deviceId;
+                """;
+            cmd.Parameters.AddWithValue("$id", unchecked((long)signedPreKeyId));
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+
+            using var reader = await cmd.ExecuteReaderAsync(token).ConfigureAwait(false);
+            if (!await reader.ReadAsync(token).ConfigureAwait(false))
+            {
+                return null;
+            }
+
+            return new SignedPreKeyEntry(
+                signedPreKeyId,
+                (byte[])reader.GetValue(0),
+                (byte[])reader.GetValue(1),
+                reader.GetInt64(2));
+        }, ct));
+
+    public ValueTask SaveSignedPreKeyAsync(SignedPreKeyEntry entry, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        ArgumentNullException.ThrowIfNull(entry.KeyPairBytes);
+        ArgumentNullException.ThrowIfNull(entry.Signature);
+
+        return new(_runner.RunWriteTransactionAsync(async (conn, token) =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO signed_prekeys (id, device_id, key_pair, signature, created_at)
+                VALUES ($id, $deviceId, $keyPair, $signature, $createdAt)
+                ON CONFLICT(id, device_id) DO UPDATE SET
+                    key_pair = excluded.key_pair,
+                    signature = excluded.signature,
+                    created_at = excluded.created_at;
+                """;
+            cmd.Parameters.AddWithValue("$id", unchecked((long)entry.Id));
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            cmd.Parameters.AddWithValue("$keyPair", entry.KeyPairBytes);
+            cmd.Parameters.AddWithValue("$signature", entry.Signature);
+            cmd.Parameters.AddWithValue("$createdAt", entry.CreatedAtUnixSeconds);
+            await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, ct));
+    }
+
+    public ValueTask DeleteSignedPreKeyAsync(uint signedPreKeyId, CancellationToken ct = default) =>
+        new(_runner.RunWriteTransactionAsync(async (conn, token) =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                DELETE FROM signed_prekeys
+                WHERE id = $id AND device_id = $deviceId;
+                """;
+            cmd.Parameters.AddWithValue("$id", unchecked((long)signedPreKeyId));
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, ct));
+
     public ValueTask<byte[]?> GetSenderKeyAsync(string groupJid, string senderAddress, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(groupJid);
@@ -211,6 +311,25 @@ internal sealed class SqliteSignalStore : ISignalStore
             cmd.Parameters.AddWithValue("$senderAddress", senderAddress);
             cmd.Parameters.AddWithValue("$deviceId", _deviceId);
             cmd.Parameters.AddWithValue("$record", recordBytes);
+            await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, ct));
+    }
+
+    public ValueTask DeleteSenderKeyAsync(string groupJid, string senderAddress, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(groupJid);
+        ArgumentException.ThrowIfNullOrEmpty(senderAddress);
+
+        return new(_runner.RunWriteTransactionAsync(async (conn, token) =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                DELETE FROM sender_keys
+                WHERE group_jid = $groupJid AND sender_address = $senderAddress AND device_id = $deviceId;
+                """;
+            cmd.Parameters.AddWithValue("$groupJid", groupJid);
+            cmd.Parameters.AddWithValue("$senderAddress", senderAddress);
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
             await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, ct));
     }

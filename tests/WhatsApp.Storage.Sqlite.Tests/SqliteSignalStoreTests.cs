@@ -133,6 +133,20 @@ public sealed class SqliteSignalStoreTests
             SenderKeyCipher.ProcessDistribution(receiverRecord, skdm);
             byte[] groupPlain = SenderKeyCipher.Decrypt(receiverRecord, encrypted);
             CollectionAssert.AreEqual("group-persisted"u8.ToArray(), groupPlain);
+
+            // Signed PreKey rotation history (002_signed_prekeys)
+            var myId = Curve25519.GenerateKeyPair();
+            var spk1 = PreKeyManager.CreateSignedPreKey(42, myId);
+            byte[] kpBytes = [.. spk1.KeyPair.PrivateKey, .. spk1.KeyPair.PublicKey];
+            var entry = new WhatsApp.Protocol.Abstractions.SignedPreKeyEntry(42, kpBytes, spk1.Signature, 1700000000);
+            await backend1.Signal.SaveSignedPreKeyAsync(entry);
+            var loadedSpk = await backend1.Signal.GetSignedPreKeyAsync(42);
+            Assert.IsNotNull(loadedSpk);
+            CollectionAssert.AreEqual(kpBytes, loadedSpk.KeyPairBytes);
+            CollectionAssert.AreEqual(spk1.Signature, loadedSpk.Signature);
+            Assert.IsNull(await backend2.Signal.GetSignedPreKeyAsync(42));
+            await backend1.Signal.DeleteSignedPreKeyAsync(42);
+            Assert.IsNull(await backend1.Signal.GetSignedPreKeyAsync(42));
         }
         finally
         {

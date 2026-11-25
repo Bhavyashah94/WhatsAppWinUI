@@ -136,6 +136,94 @@ public sealed class WaProtoCodegenTests
         Assert.AreEqual(50, req.OnDemandMsgCount);
     }
 
+    [TestMethod]
+    public void LiveWebSyncedSchemas_DraftSync_ConversationDraft_BusinessFolder_PairingProgress_RoundTrip()
+    {
+        var proto = new Message
+        {
+            ProtocolMessage = new Message.Types.ProtocolMessage
+            {
+                Type = Message.Types.ProtocolMessage.Types.Type.DraftMessageSync,
+                MessageEditDisplayType = Message.Types.ProtocolMessage.Types.MessageEditDisplayType.LinkPreviewOnly,
+                DraftMessageSync = new DraftMessageSync
+                {
+                    ChatJid = "15550101001@s.whatsapp.net",
+                    Action = DraftMessageSync.Types.Action.Set,
+                    EditTimestampMs = 1700000500000,
+                    Draft = new Message { Conversation = "Unsent draft" },
+                    ClearReason = DraftMessageSync.Types.ClearReason.UserCleared
+                }
+            }
+        };
+        var parsedMsg = Message.Parser.ParseFrom(proto.ToByteArray());
+        Assert.AreEqual(Message.Types.ProtocolMessage.Types.Type.DraftMessageSync, parsedMsg.ProtocolMessage.Type);
+        Assert.AreEqual("Unsent draft", parsedMsg.ProtocolMessage.DraftMessageSync.Draft.Conversation);
+
+        var conv = new Conversation
+        {
+            Id = "15550101001@s.whatsapp.net",
+            UnreadReplyToMyMessageCount = 3,
+            Draft = new ConversationDraft
+            {
+                Content = new Message { Conversation = "Draft text" },
+                EditTimestampMs = 1700000500123,
+                EditorDeviceId = 1
+            }
+        };
+        var parsedConv = Conversation.Parser.ParseFrom(conv.ToByteArray());
+        Assert.AreEqual(3U, parsedConv.UnreadReplyToMyMessageCount);
+        Assert.AreEqual("Draft text", parsedConv.Draft.Content.Conversation);
+
+        var cfg = new DeviceProps.Types.HistorySyncConfig { SupportDraftSync = true };
+        Assert.IsTrue(DeviceProps.Types.HistorySyncConfig.Parser.ParseFrom(cfg.ToByteArray()).SupportDraftSync);
+
+        var pairing = new ClientPairingProps { IsCompanionPairingProgressUiEnabled = true };
+        Assert.IsTrue(ClientPairingProps.Parser.ParseFrom(pairing.ToByteArray()).IsCompanionPairingProgressUiEnabled);
+
+        var bizAction = new SyncActionValue
+        {
+            Timestamp = 1700000600000,
+            BusinessFolderChatPreferenceAction = new SyncActionValue.Types.BusinessFolderChatPreferenceAction
+            {
+                Preference = SyncActionValue.Types.BusinessFolderChatPreferenceAction.Types.BusinessFolderChatPreference.Automatic
+            }
+        };
+        var parsedAction = SyncActionValue.Parser.ParseFrom(bizAction.ToByteArray());
+        Assert.AreEqual(
+            SyncActionValue.Types.BusinessFolderChatPreferenceAction.Types.BusinessFolderChatPreference.Automatic,
+            parsedAction.BusinessFolderChatPreferenceAction.Preference);
+
+        var annotation = new InteractiveAnnotation
+        {
+            PixKey = new StatusPixKey
+            {
+                Key = "pix@example.com",
+                KeyType = StatusPixKey.Types.KeyType.Email,
+                DisplayName = "Pix Merchant"
+            }
+        };
+        var parsedAnnot = InteractiveAnnotation.Parser.ParseFrom(annotation.ToByteArray());
+        Assert.AreEqual(StatusPixKey.Types.KeyType.Email, parsedAnnot.PixKey.KeyType);
+        Assert.AreEqual("Pix Merchant", parsedAnnot.PixKey.DisplayName);
+
+        var caps = new DeviceCapabilities
+        {
+            RecentConversationsOnDemand = new DeviceCapabilities.Types.RecentConversationsOnDemand { Supported = true },
+            AiMuseJarvisGzip = new DeviceCapabilities.Types.AiMuseJarvisGzip { SupportVersion = 2 },
+            DraftSync = new DeviceCapabilities.Types.DraftSync { Version = 1 }
+        };
+        var parsedCaps = DeviceCapabilities.Parser.ParseFrom(caps.ToByteArray());
+        Assert.IsTrue(parsedCaps.RecentConversationsOnDemand.Supported);
+        Assert.AreEqual(2U, parsedCaps.AiMuseJarvisGzip.SupportVersion);
+        Assert.AreEqual(1U, parsedCaps.DraftSync.Version);
+
+        var serverErr = new ServerErrorReceipt { StanzaId = "stz-1", KeepMediaKey = true };
+        Assert.IsTrue(ServerErrorReceipt.Parser.ParseFrom(serverErr.ToByteArray()).KeepMediaKey);
+
+        var pollOpt = new Message.Types.PollCreationMessage.Types.Option { OptionName = "A", OptionDatetime = 1700000700000 };
+        Assert.AreEqual(1700000700000, Message.Types.PollCreationMessage.Types.Option.Parser.ParseFrom(pollOpt.ToByteArray()).OptionDatetime);
+    }
+
     private static byte[] CompressZlib(byte[] uncompressed)
     {
         using var output = new MemoryStream();

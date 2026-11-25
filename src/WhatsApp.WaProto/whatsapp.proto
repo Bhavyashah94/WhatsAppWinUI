@@ -1244,6 +1244,7 @@ message ClientPairingProps {
   optional bool isBotJidDbMigrated = 6;
   optional bytes companionAddPeerPayload = 7;
   optional bool isCompanionRegistrationFgsEnabled = 8;
+  optional bool isCompanionPairingProgressUiEnabled = 10;
 }
 
 message ClientPayload {
@@ -1950,6 +1951,8 @@ message Conversation {
   optional bool isWorkGroup = 67;
   optional int32 nonE2EeType = 68;
   optional NonE2EEAttestation.AccountType contactAccountEncryptionAttestationType = 69;
+  optional uint32 unreadReplyToMyMessageCount = 70;
+  optional ConversationDraft draft = 71;
   enum EndOfHistoryTransferType {
     COMPLETE_BUT_MORE_MESSAGES_REMAIN_ON_PRIMARY = 0;
     COMPLETE_AND_NO_MORE_MESSAGE_REMAIN_ON_PRIMARY = 1;
@@ -1962,6 +1965,12 @@ message Conversation {
     APPEAL_APPROVED = 2;
     APPEAL_REJECTED = 3;
   }
+}
+
+message ConversationDraft {
+  optional Message content = 1;
+  optional int64 editTimestampMs = 2;
+  optional uint32 editorDeviceId = 3;
 }
 
 message CreateBackupInput {
@@ -2067,9 +2076,16 @@ message DeviceCapabilities {
   optional HostWriteMutationSupport hostWriteMutationSupport = 12;
   optional BizAiWebOnboarding bizAiWebOnboarding = 13;
   optional PhoneNumberSharing phoneNumberSharing = 14;
+  optional RecentConversationsOnDemand recentConversationsOnDemand = 15;
+  optional AiMuseJarvisGzip aiMuseJarvisGzip = 16;
+  optional DraftSync draftSync = 17;
   message AiFbidMigration {
     optional uint64 chatDbMigrationTimestamp = 1;
     optional uint32 supportVersion = 2;
+  }
+
+  message AiMuseJarvisGzip {
+    optional uint32 supportVersion = 1;
   }
 
   message AiThread {
@@ -2107,6 +2123,10 @@ message DeviceCapabilities {
     optional bool refreshSupported = 1;
   }
 
+  message DraftSync {
+    optional uint32 version = 1;
+  }
+
   message HostWriteMutationSupport {
     repeated string mutationNames = 1;
   }
@@ -2128,6 +2148,10 @@ message DeviceCapabilities {
 
   message PhoneNumberSharing {
     optional bool phoneSharingSupported = 1;
+  }
+
+  message RecentConversationsOnDemand {
+    optional bool supported = 1;
   }
 
   message ReverseHistorySync {
@@ -2217,6 +2241,7 @@ message DeviceProps {
     optional bool supportNewsletter = 25;
     optional bool supportUniversalReachChat = 26;
     optional bool supportOmittedConversationMetadata = 28;
+    optional bool supportDraftSync = 29;
   }
 
   enum PlatformType {
@@ -2364,6 +2389,27 @@ message EpochDerivationEdge {
   required EpochIds toEpoch = 2;
   optional ForwardEdgeInput forwardEdge = 3;
   optional bytes backwardEdge = 4;
+}
+
+message DraftMessageSync {
+  optional string chatJid = 1;
+  optional string altChatJid = 2;
+  optional Action action = 3;
+  optional int64 editTimestampMs = 4;
+  optional Message draft = 5;
+  optional ClearReason clearReason = 6;
+  enum Action {
+    ACTION_UNKNOWN = 0;
+    SET = 1;
+    CLEAR = 2;
+  }
+  enum ClearReason {
+    CLEAR_REASON_UNKNOWN = 0;
+    USER_CLEARED = 1;
+    SENT = 2;
+    CHAT_LOCKED = 3;
+    REPLACED_BY_NON_TEXT = 4;
+  }
 }
 
 message EpochIds {
@@ -2768,6 +2814,7 @@ message InteractiveAnnotation {
     ContextInfo.ForwardedNewsletterMessageInfo newsletter = 3;
     bool embeddedAction = 6;
     TapLinkAction tapAction = 7;
+    StatusPixKey pixKey = 9;
   }
   enum StatusLinkType {
     RASTERIZED_LINK_PREVIEW = 1;
@@ -3691,6 +3738,7 @@ message Message {
 
   message InitialSecurityNotificationSettingSync {
     optional bool securityNotificationEnabled = 1;
+    optional int32 initialAppTheme = 2;
   }
 
   enum InsightDeliveryState {
@@ -4437,6 +4485,7 @@ message Message {
     message Option {
       optional string optionName = 1;
       optional string optionHash = 2;
+      optional int64 optionDatetime = 3;
     }
   }
 
@@ -4543,6 +4592,12 @@ message Message {
     optional GroupRootKeyRequest groupRootKeyRequest = 39;
     optional MembershipFormKeyFingerprintVerification membershipFormKeyFingerprintVerification = 40;
     optional GroupRootKeyShare groupRootKeyShare = 41;
+    optional MessageEditDisplayType messageEditDisplayType = 42;
+    optional DraftMessageSync draftMessageSync = 43;
+    enum MessageEditDisplayType {
+      DEFAULT = 0;
+      LINK_PREVIEW_ONLY = 1;
+    }
     enum Type {
       REVOKE = 0;
       EPHEMERAL_SETTING = 3;
@@ -4582,6 +4637,7 @@ message Message {
       GROUP_ROOT_KEY_REQUEST = 42;
       MEMBERSHIP_FORM_KEY_FINGERPRINT_VERIFICATION = 43;
       GROUP_ROOT_KEY_SHARE = 44;
+      DRAFT_MESSAGE_SYNC = 45;
     }
   }
 
@@ -5920,6 +5976,7 @@ message SenderKeyStateStructure {
 
 message ServerErrorReceipt {
   optional string stanzaId = 1;
+  optional bool keepMediaKey = 2;
 }
 
 message SessionStructure {
@@ -6111,6 +6168,20 @@ message StatusMentionMessage {
   optional Message quotedStatus = 1;
 }
 
+message StatusPixKey {
+  optional string key = 1;
+  optional KeyType keyType = 2;
+  optional string displayName = 3;
+  enum KeyType {
+    UNKNOWN = 0;
+    CPF = 1;
+    CNPJ = 2;
+    PHONE = 3;
+    EMAIL = 4;
+    EVP = 5;
+  }
+}
+
 message StatusPSA {
   required uint64 campaignId = 44;
   optional uint64 campaignExpirationTimestamp = 45;
@@ -6233,6 +6304,7 @@ message SyncActionValue {
   optional CommunityNestingStateAction communityNestingStateAction = 99;
   optional SharedDeviceSecretAction sharedDeviceSecretAction = 100;
   optional HatchCVMSecretAction hatchCvmSecretAction = 101;
+  optional BusinessFolderChatPreferenceAction businessFolderChatPreferenceAction = 102;
   message AgentAction {
     optional string name = 1;
     optional int32 deviceId = 2;
@@ -6356,6 +6428,16 @@ message SyncActionValue {
     optional bool activated = 1;
   }
 
+  message BusinessFolderChatPreferenceAction {
+    optional BusinessFolderChatPreference preference = 1;
+    enum BusinessFolderChatPreference {
+      BUSINESS_FOLDER_CHAT_PREFERENCE_UNKNOWN = 0;
+      BUSINESS_FOLDER_CHAT_PREFERENCE_AUTOMATIC = 1;
+      BUSINESS_FOLDER_CHAT_PREFERENCE_INBOX = 2;
+      BUSINESS_FOLDER_CHAT_PREFERENCE_BUSINESS = 3;
+    }
+  }
+
   message CallLogAction {
     optional CallLogRecord callLogRecord = 1;
   }
@@ -6393,6 +6475,7 @@ message SyncActionValue {
     optional string pnJid = 5;
     optional string username = 6;
     optional string birthday = 7;
+    optional int32 nonE2EeType = 8;
   }
 
   message ContactManagerMetadataAction {
@@ -6545,6 +6628,7 @@ message SyncActionValue {
     optional string firstName = 2;
     optional string username = 3;
     optional string birthday = 4;
+    optional int32 nonE2EeType = 5;
   }
 
   message LocaleSetting {

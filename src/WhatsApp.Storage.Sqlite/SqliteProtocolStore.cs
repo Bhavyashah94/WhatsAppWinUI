@@ -123,6 +123,22 @@ internal sealed class SqliteProtocolStore : IProtocolStore
         }, ct));
     }
 
+    public ValueTask DeleteDeviceListAsync(string userJid, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(userJid);
+        return new(_runner.RunWriteTransactionAsync(async (conn, token) =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                DELETE FROM device_list_cache
+                WHERE user_jid = $userJid AND device_id = $deviceId;
+                """;
+            cmd.Parameters.AddWithValue("$userJid", userJid);
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, ct));
+    }
+
     public ValueTask StoreTcTokenAsync(string jid, byte[] token, long timestamp, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(jid);

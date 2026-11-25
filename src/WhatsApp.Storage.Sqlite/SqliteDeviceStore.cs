@@ -67,6 +67,7 @@ internal sealed class SqliteDeviceStore : IDeviceStore
                 "signal_identities",
                 "signal_sessions",
                 "prekeys",
+                "signed_prekeys",
                 "sender_keys",
                 "app_state_keys",
                 "app_state_versions",

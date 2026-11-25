@@ -1,10 +1,24 @@
 using System.Threading.Channels;
+using Whatsapp;
 using WhatsApp.Protocol.Abstractions;
 using WhatsApp.Protocol.Binary;
 using WhatsApp.Protocol.Binary.Stanzas;
 using WhatsApp.Protocol.Crypto;
+using WhatsApp.Protocol.Noise;
 
 namespace WhatsApp.Api;
+
+/// <summary>
+/// Options for phone-number 8-character pair-code linking (<c>link_code_companion_reg</c>).
+/// </summary>
+public sealed class PairCodeOptions
+{
+    public required string PhoneNumber { get; init; }
+    public bool ShowPushNotification { get; init; } = true;
+    public string? CustomCode { get; init; }
+    public CompanionWebClientType? PlatformId { get; init; }
+    public string? DisplayOs { get; init; }
+}
 
 /// <summary>
 /// Configuration for <see cref="PairingHandler"/> QR rotation cadence and client type suffix.
@@ -28,6 +42,8 @@ public sealed class PairingOptions
 public sealed class PairingHandler : IAsyncDisposable
 {
     private readonly Func<Node, CancellationToken, ValueTask> _sendStanzaAsync;
+    private readonly Func<Node, CancellationToken, ValueTask<Node>>? _sendIqAsync;
+    private readonly Func<string>? _nextIqId;
     private readonly IDeviceStore _deviceStore;
     private readonly DeviceCredentials _credentials;
     private readonly Func<WhatsAppEvent, ValueTask> _emitEventAsync;
@@ -38,7 +54,20 @@ public sealed class PairingHandler : IAsyncDisposable
     private readonly CancellationTokenSource _disposeCts = new();
     private CancellationTokenSource? _qrRotationCts;
     private Task? _qrRotationTask;
+    private PairCodeFlowState? _pairCodeState;
+    private long _fallbackIqSeq;
     private int _disposed;
+
+    private sealed class PairCodeFlowState
+    {
+        public required string PhoneDigits { get; init; }
+        public required string Code { get; init; }
+        public required KeyPair EphemeralKeyPair { get; init; }
+        public required byte[] PairingRef { get; init; }
+        public required DateTimeOffset ExpiresAtUtc { get; init; }
+        public int PrimaryHelloCount { get; set; }
+        public bool Completed { get; set; }
+    }
 
     public PairingHandler(
         Func<Node, CancellationToken, ValueTask> sendStanzaAsync,
@@ -46,9 +75,13 @@ public sealed class PairingHandler : IAsyncDisposable
         DeviceCredentials credentials,
         Func<WhatsAppEvent, ValueTask> emitEventAsync,
         Func<CancellationToken, ValueTask>? onQrCodesExhaustedAsync = null,
-        PairingOptions? options = null)
+        PairingOptions? options = null,
+        Func<Node, CancellationToken, ValueTask<Node>>? sendIqAsync = null,
+        Func<string>? nextIqId = null)
     {
         _sendStanzaAsync = sendStanzaAsync ?? throw new ArgumentNullException(nameof(sendStanzaAsync));
+        _sendIqAsync = sendIqAsync;
+        _nextIqId = nextIqId;
         _deviceStore = deviceStore ?? throw new ArgumentNullException(nameof(deviceStore));
         _credentials = credentials ?? throw new ArgumentNullException(nameof(credentials));
         _emitEventAsync = emitEventAsync ?? throw new ArgumentNullException(nameof(emitEventAsync));
@@ -62,18 +95,191 @@ public sealed class PairingHandler : IAsyncDisposable
         DeviceCredentials credentials,
         ChannelWriter<WhatsAppEvent> eventWriter,
         Func<CancellationToken, ValueTask>? onQrCodesExhaustedAsync = null,
-        PairingOptions? options = null)
+        PairingOptions? options = null,
+        IqClient? iqClient = null)
         : this(
             (node, ct) => new ValueTask(socket.SendNodeAsync(node, ct)),
             deviceStore,
             credentials,
             (evt) => eventWriter.WriteAsync(evt),
             onQrCodesExhaustedAsync,
-            options)
+            options,
+            iqClient is not null ? (iq, ct) => new ValueTask<Node>(iqClient.SendIqAsync(iq, PairCodeCrypto.CompanionFinishIqTimeout, ct)) : null,
+            iqClient is not null ? iqClient.NextRequestId : null)
     {
         ArgumentNullException.ThrowIfNull(socket);
         ArgumentNullException.ThrowIfNull(eventWriter);
     }
+
+    public async Task<string> RequestPairCodeAsync(PairCodeOptions options, CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        ArgumentNullException.ThrowIfNull(options);
+        if (_sendIqAsync is null)
+        {
+            throw new InvalidOperationException("Pair-code linking requires an IQ sender (IqClient).");
+        }
+
+        string phoneDigits = new(options.PhoneNumber.Where(char.IsAsciiDigit).ToArray());
+        if (phoneDigits.Length < 5)
+        {
+            throw new ArgumentException("Phone number must include country code digits.", nameof(options));
+        }
+
+        string code;
+        if (!string.IsNullOrWhiteSpace(options.CustomCode))
+        {
+            code = options.CustomCode.Trim().ToUpperInvariant();
+            if (!PairCodeCrypto.ValidateCode(code))
+            {
+                throw new ArgumentException("Custom pair code must be 8 valid Crockford Base32 characters.", nameof(options));
+            }
+        }
+        else
+        {
+            code = PairCodeCrypto.GenerateCode();
+        }
+
+        await _pairLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            DateTimeOffset now = _options.TimeProvider.GetUtcNow();
+            if (_pairCodeState is { Completed: false } existing && now <= existing.ExpiresAtUtc)
+            {
+                throw new InvalidOperationException("A phone-number pair code flow is already active.");
+            }
+
+            KeyPair ephemeral = Curve25519.GenerateKeyPair();
+            byte[] wrappedEph = PairCodeCrypto.EncryptEphemeralPublicKey(ephemeral.PublicKey, code);
+            var (platformId, display) = PairCodeCrypto.ResolveCompanionPlatform(
+                null,
+                options.PlatformId,
+                options.DisplayOs);
+
+            string iqId = NextRequestId();
+            Node helloIq = PairCodeCrypto.BuildCompanionHelloIq(
+                iqId,
+                phoneDigits,
+                _credentials.NoiseKey.PublicKey,
+                wrappedEph,
+                platformId,
+                display,
+                options.ShowPushNotification);
+
+            Node resp = await _sendIqAsync(helloIq, ct).ConfigureAwait(false);
+            byte[] pairingRef = PairCodeCrypto.ParseCompanionHelloResponse(resp)
+                ?? throw new PairingException(500, "internal-server-error", "companion_hello response missing link_code_pairing_ref.");
+
+            _pairCodeState = new PairCodeFlowState
+            {
+                PhoneDigits = phoneDigits,
+                Code = code,
+                EphemeralKeyPair = ephemeral,
+                PairingRef = pairingRef,
+                ExpiresAtUtc = now + PairCodeCrypto.DefaultCodeValidity
+            };
+        }
+        finally
+        {
+            _pairLock.Release();
+        }
+
+        await _emitEventAsync(new PairCodeEvent(code, phoneDigits, PairCodeCrypto.DefaultCodeValidity)).ConfigureAwait(false);
+        return code;
+    }
+
+    public async ValueTask<bool> HandleNotificationAsync(Node notificationNode, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(notificationNode);
+        if (notificationNode.Tag != "notification" || notificationNode.GetChild("link_code_companion_reg") is null)
+        {
+            return false;
+        }
+
+        string? notifId = notificationNode.GetAttr("id");
+        if (!string.IsNullOrEmpty(notifId)
+            && notificationNode.GetAttr("from") is { Length: > 0 } fromStr
+            && Jid.TryParse(fromStr, out var fromJid))
+        {
+            await _sendStanzaAsync(AckStanza.Build(notifId, "notification", fromJid, notificationNode.GetAttr("type")), ct)
+                .ConfigureAwait(false);
+        }
+
+        if (PairCodeCrypto.IsRefreshCodeNotification(notificationNode))
+        {
+            await _emitEventAsync(new PairCodeRefreshRequestedEvent()).ConfigureAwait(false);
+            return true;
+        }
+
+        if (!PairCodeCrypto.TryParsePrimaryHelloNotification(notificationNode, out var primaryHello) || primaryHello is null)
+        {
+            return false;
+        }
+
+        await HandlePrimaryHelloAsync(primaryHello, ct).ConfigureAwait(false);
+        return true;
+    }
+
+    private async Task HandlePrimaryHelloAsync(ParsedPrimaryHello hello, CancellationToken ct)
+    {
+        if (_sendIqAsync is null)
+        {
+            return;
+        }
+
+        byte[] wrappedBundle;
+        string phoneDigits;
+        byte[] pairingRef;
+
+        await _pairLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            PairCodeFlowState? state = _pairCodeState;
+            if (state is null || state.Completed)
+            {
+                return;
+            }
+
+            if (_options.TimeProvider.GetUtcNow() > state.ExpiresAtUtc
+                || state.PrimaryHelloCount >= PairCodeCrypto.MaxPrimaryHelloAttempts
+                || !state.PairingRef.AsSpan().SequenceEqual(hello.PairingRef))
+            {
+                return;
+            }
+
+            state.PrimaryHelloCount++;
+            byte[] primaryEphPub = PairCodeCrypto.DecryptPrimaryEphemeralPublicKey(hello.WrappedPrimaryEphemeralPub, state.Code);
+            WrappedKeyBundleResult bundle = PairCodeCrypto.PrepareKeyBundle(
+                state.EphemeralKeyPair,
+                primaryEphPub,
+                hello.PrimaryIdentityPub,
+                _credentials.IdentityKey);
+
+            // Pre-wire durability: persist derived AdvSecretKey before sending companion_finish.
+            _credentials.AdvSecretKey = bundle.AdvSecretKey;
+            await _deviceStore.SaveAsync(_credentials, ct).ConfigureAwait(false);
+
+            wrappedBundle = bundle.WrappedBundle;
+            phoneDigits = state.PhoneDigits;
+            pairingRef = state.PairingRef;
+        }
+        finally
+        {
+            _pairLock.Release();
+        }
+
+        Node finishIq = PairCodeCrypto.BuildCompanionFinishIq(
+            NextRequestId(),
+            phoneDigits,
+            wrappedBundle,
+            _credentials.IdentityKey.PublicKey,
+            pairingRef);
+
+        await _sendIqAsync(finishIq, ct).ConfigureAwait(false);
+    }
+
+    private string NextRequestId() =>
+        _nextIqId?.Invoke() ?? $"paircode-{Interlocked.Increment(ref _fallbackIqSeq)}";
 
     /// <summary>
     /// Processes an inbound <c>&lt;iq&gt;</c> node if it carries <c>&lt;pair-device&gt;</c>
@@ -193,8 +399,12 @@ public sealed class PairingHandler : IAsyncDisposable
                 return;
             }
 
-            // Crypto verified: retire active QR rotation now.
+            // Crypto verified: retire active QR rotation / pair-code flow now.
             (previousCts, previousTask) = DetachQrRotationLocked();
+            if (_pairCodeState is not null)
+            {
+                _pairCodeState.Completed = true;
+            }
 
             Jid? prevPn = _credentials.Pn;
             Jid? prevLid = _credentials.Lid;

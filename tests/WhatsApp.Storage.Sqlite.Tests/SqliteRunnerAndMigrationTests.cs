@@ -70,7 +70,7 @@ public sealed class SqliteRunnerAndMigrationTests
             Assert.AreEqual("wal", journalMode.ToLowerInvariant());
             Assert.AreEqual("1", synchronous, "PRAGMA synchronous=NORMAL corresponds to 1");
             Assert.AreEqual("1", foreignKeys, "PRAGMA foreign_keys=ON corresponds to 1");
-            Assert.AreEqual(1L, migrationCount);
+            Assert.AreEqual(2L, migrationCount);
 
             foreach (string expectedTable in new[]
             {
@@ -79,6 +79,7 @@ public sealed class SqliteRunnerAndMigrationTests
                 "signal_identities",
                 "signal_sessions",
                 "prekeys",
+                "signed_prekeys",
                 "sender_keys",
                 "app_state_keys",
                 "app_state_versions",
@@ -137,7 +138,7 @@ public sealed class SqliteRunnerAndMigrationTests
                 return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
             });
 
-            Assert.AreEqual(1L, migrationCount);
+            Assert.AreEqual(2L, migrationCount);
         }
         finally
         {

@@ -1,7 +1,9 @@
 using System.Threading.Channels;
 using WhatsApp.Protocol.Abstractions;
+using WhatsApp.Protocol.AppState;
 using WhatsApp.Protocol.Binary;
 using WhatsApp.Protocol.Binary.Stanzas;
+using WhatsApp.Protocol.HistorySync;
 using WhatsApp.Protocol.Signal;
 
 namespace WhatsApp.Api;
@@ -18,8 +20,10 @@ public sealed class ConnectionOrchestratorOptions
     public PairingOptions? PairingOptions { get; init; }
     public KeepaliveOptions? KeepaliveOptions { get; init; }
     public OfflineBatchOptions? OfflineBatchOptions { get; init; }
+    public IHttpClient? HttpClient { get; init; }
     public bool AutoSendActiveIq { get; init; } = true;
     public bool AutoUploadPreKeys { get; init; } = true;
+    public bool AutoSyncAppState { get; init; } = true;
     public bool ForcePreKeyUpload { get; init; }
     public int WantedPreKeyCount { get; init; } = PreKeyUploader.DefaultWantedCount;
     public StanzaHandlers? ExternalHandlers { get; init; }
@@ -38,11 +42,17 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
     private readonly ConnectionOrchestratorOptions _options;
     private readonly Channel<WhatsAppEvent> _events = Channel.CreateUnbounded<WhatsAppEvent>();
     private readonly SemaphoreSlim _runGate = new(1, 1);
+    private readonly LidPnCache _lidPnCache;
 
     private CancellationTokenSource? _runCts;
     private Task? _runTask;
     private NoiseSessionSocket? _activeSocket;
     private IqClient? _activeIqClient;
+    private PairingHandler? _activePairing;
+    private SyncdCoordinator? _activeSyncd;
+    private UsyncClient? _activeUsync;
+    private ProfilePictureClient? _activeProfilePictures;
+    private NotificationRouter? _activeNotifications;
     private long _generation;
     private int _disposed;
 
@@ -54,6 +64,7 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _transportFactory = transportFactory ?? throw new ArgumentNullException(nameof(transportFactory));
         _options = options ?? new ConnectionOrchestratorOptions();
+        _lidPnCache = new LidPnCache(_options.TimeProvider);
         if (_options.Endpoints.Count == 0)
         {
             throw new ArgumentException("At least one transport endpoint is required.", nameof(options));
@@ -64,6 +75,12 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
     public long CurrentGeneration => Volatile.Read(ref _generation);
     public NoiseSessionSocket? ActiveSocket => Volatile.Read(ref _activeSocket);
     public IqClient? ActiveIqClient => Volatile.Read(ref _activeIqClient);
+    public PairingHandler? ActivePairing => Volatile.Read(ref _activePairing);
+    public SyncdCoordinator? ActiveSyncd => Volatile.Read(ref _activeSyncd);
+    public ILidPnCache LidPnCache => _lidPnCache;
+    public UsyncClient? ActiveUsync => Volatile.Read(ref _activeUsync);
+    public ProfilePictureClient? ActiveProfilePictures => Volatile.Read(ref _activeProfilePictures);
+    public NotificationRouter? ActiveNotifications => Volatile.Read(ref _activeNotifications);
 
     /// <summary>
     /// Starts the managed background connect-and-reconnect loop until stopped, logged out/replaced,
@@ -184,6 +201,8 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
         NoiseSessionSocket? socket = null;
         StanzaRouter? router = null;
         PairingHandler? pairing = null;
+        SyncdCoordinator? syncd = null;
+        NotificationRouter? notifications = null;
         KeepaliveWatchdog? watchdog = null;
         OfflineBatchCoordinator? offlineBatch = null;
 
@@ -205,6 +224,12 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
 
         try
         {
+            IReadOnlyList<LidPnMappingRecord> persistedMappings = await _backend.Protocol.LoadLidPnMappingsAsync(ct).ConfigureAwait(false);
+            foreach (LidPnMappingRecord mapping in persistedMappings)
+            {
+                _lidPnCache.Learn(mapping.PnJid, mapping.LidJid, LidPnLearningSource.HistorySync);
+            }
+
             DeviceCredentials credentials = await _backend.Device.LoadOrCreateAsync(ct).ConfigureAwait(false);
             transport = await _transportFactory.ConnectAsync(_options.Endpoints, ct).ConfigureAwait(false);
 
@@ -243,7 +268,28 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
                     SignalDisconnect(new SessionOutcome("QR codes exhausted", StopReconnect: false));
                     return ValueTask.CompletedTask;
                 },
-                options: _options.PairingOptions);
+                options: _options.PairingOptions,
+                iqClient: iqClient);
+            Volatile.Write(ref _activePairing, pairing);
+
+            if (_options.HttpClient is { } http)
+            {
+                syncd = new SyncdCoordinator(_backend, http, iqClient, EmitEventAsync);
+                Volatile.Write(ref _activeSyncd, syncd);
+            }
+
+            Volatile.Write(ref _activeUsync, new UsyncClient(iqClient, _backend, _lidPnCache, _options.TimeProvider));
+            Volatile.Write(ref _activeProfilePictures, new ProfilePictureClient(iqClient, _backend, _options.HttpClient));
+            notifications = new NotificationRouter(
+                _backend,
+                _lidPnCache,
+                credentials,
+                socket,
+                iqClient,
+                syncd,
+                EmitEventAsync,
+                _options.TimeProvider);
+            Volatile.Write(ref _activeNotifications, notifications);
 
             KeepaliveOptions keepaliveOpts = _options.KeepaliveOptions ?? new KeepaliveOptions
             {
@@ -312,6 +358,7 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
                             bit,
                             iqClient,
                             offlineBatch,
+                            syncd,
                             gen,
                             sessionStopCts.Token));
                     }
@@ -457,7 +504,31 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
 
                 OnAck = (node, token) => DispatchTrafficNodeAsync(node, token, watchdog, offlineBatch, _options.ExternalHandlers?.OnAck),
                 OnReceipt = (node, token) => DispatchTrafficNodeAsync(node, token, watchdog, offlineBatch, _options.ExternalHandlers?.OnReceipt),
-                OnNotification = (node, token) => DispatchTrafficNodeAsync(node, token, watchdog, offlineBatch, _options.ExternalHandlers?.OnNotification),
+                OnNotification = async (node, token) =>
+                {
+                    watchdog.RecordDataReceived();
+                    using var lease = offlineBatch.TrackOfflineStanza(node);
+
+                    if (await pairing.HandleNotificationAsync(node, token).ConfigureAwait(false))
+                    {
+                        return;
+                    }
+
+                    if (notifications is not null)
+                    {
+                        await notifications.HandleAsync(
+                            node,
+                            _options.AutoSyncAppState,
+                            sendAck: true,
+                            sessionStopCts.Token,
+                            token).ConfigureAwait(false);
+                    }
+
+                    if (_options.ExternalHandlers?.OnNotification is { } extNotif)
+                    {
+                        await extNotif(node, token).ConfigureAwait(false);
+                    }
+                },
                 OnMessage = (node, token) => DispatchTrafficNodeAsync(node, token, watchdog, offlineBatch, _options.ExternalHandlers?.OnMessage),
                 OnUnhandled = (node, token) => DispatchTrafficNodeAsync(node, token, watchdog, offlineBatch, _options.ExternalHandlers?.OnUnhandled),
 
@@ -489,11 +560,17 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
         {
             Volatile.Write(ref _activeSocket, null);
             Volatile.Write(ref _activeIqClient, null);
+            Volatile.Write(ref _activePairing, null);
+            Volatile.Write(ref _activeSyncd, null);
+            Volatile.Write(ref _activeUsync, null);
+            Volatile.Write(ref _activeProfilePictures, null);
+            Volatile.Write(ref _activeNotifications, null);
             sessionStopCts.Cancel();
 
             if (watchdog is not null) await watchdog.DisposeAsync().ConfigureAwait(false);
             if (router is not null) await router.DisposeAsync().ConfigureAwait(false);
             if (pairing is not null) await pairing.DisposeAsync().ConfigureAwait(false);
+            if (syncd is not null) await syncd.DisposeAsync().ConfigureAwait(false);
             if (offlineBatch is not null) await offlineBatch.DisposeAsync().ConfigureAwait(false);
             if (socket is not null) await socket.DisposeAsync().ConfigureAwait(false);
             if (transport is not null) await transport.DisposeAsync().ConfigureAwait(false);
@@ -552,6 +629,7 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
         DirtyBit bit,
         IqClient iqClient,
         OfflineBatchCoordinator offlineBatch,
+        SyncdCoordinator? syncd,
         long expectedGeneration,
         CancellationToken sessionToken)
     {
@@ -568,6 +646,21 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             if (sessionToken.IsCancellationRequested || Volatile.Read(ref _generation) != expectedGeneration)
             {
                 return;
+            }
+
+            if (string.Equals(bit.Type, DirtyBitsIq.TypeAccountSync, StringComparison.Ordinal)
+                && syncd is not null
+                && _options.AutoSyncAppState)
+            {
+                await syncd.SyncCollectionsAsync(
+                    [
+                        AppStateCollections.CriticalBlock,
+                        AppStateCollections.CriticalUnblockLow,
+                        AppStateCollections.RegularHigh,
+                        AppStateCollections.Regular,
+                        AppStateCollections.RegularLow
+                    ],
+                    ct: sessionToken).ConfigureAwait(false);
             }
 
             string id = iqClient.NextRequestId();

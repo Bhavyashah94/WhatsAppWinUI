@@ -14,24 +14,33 @@ public interface IDeviceStore
     ValueTask ClearPairingAsync(CancellationToken ct = default);
 }
 
+public sealed record SignedPreKeyEntry(uint Id, byte[] KeyPairBytes, byte[] Signature, long CreatedAtUnixSeconds);
+
 /// <summary>
-/// Signal Protocol storage contract (identities, sessions, pre-keys, sender keys).
+/// Signal Protocol storage contract (identities, sessions, pre-keys, signed pre-keys, sender keys).
 /// </summary>
 public interface ISignalStore
 {
     ValueTask<SignalSession?> GetSessionAsync(string address, CancellationToken ct = default);
     ValueTask SaveSessionAsync(string address, SignalSession session, CancellationToken ct = default);
     ValueTask DeleteSessionAsync(string address, CancellationToken ct = default);
+    ValueTask DeleteSessionsByUserAsync(string user, CancellationToken ct = default);
 
     ValueTask<byte[]?> GetIdentityAsync(string address, CancellationToken ct = default);
     ValueTask SaveIdentityAsync(string address, byte[] identityKey, CancellationToken ct = default);
+    ValueTask DeleteIdentityAsync(string address, CancellationToken ct = default);
 
     ValueTask<byte[]?> GetPreKeyAsync(uint preKeyId, CancellationToken ct = default);
     ValueTask SavePreKeysAsync(IReadOnlyList<(uint Id, byte[] KeyPairBytes)> preKeys, CancellationToken ct = default);
     ValueTask DeletePreKeyAsync(uint preKeyId, CancellationToken ct = default);
 
+    ValueTask<SignedPreKeyEntry?> GetSignedPreKeyAsync(uint signedPreKeyId, CancellationToken ct = default);
+    ValueTask SaveSignedPreKeyAsync(SignedPreKeyEntry entry, CancellationToken ct = default);
+    ValueTask DeleteSignedPreKeyAsync(uint signedPreKeyId, CancellationToken ct = default);
+
     ValueTask<byte[]?> GetSenderKeyAsync(string groupJid, string senderAddress, CancellationToken ct = default);
     ValueTask SaveSenderKeyAsync(string groupJid, string senderAddress, byte[] recordBytes, CancellationToken ct = default);
+    ValueTask DeleteSenderKeyAsync(string groupJid, string senderAddress, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -70,6 +79,7 @@ public interface IProtocolStore
 
     ValueTask<IReadOnlyList<uint>> GetDeviceListAsync(string userJid, CancellationToken ct = default);
     ValueTask SaveDeviceListAsync(string userJid, IReadOnlyList<uint> deviceIds, CancellationToken ct = default);
+    ValueTask DeleteDeviceListAsync(string userJid, CancellationToken ct = default);
 
     ValueTask StoreTcTokenAsync(string jid, byte[] token, long timestamp, CancellationToken ct = default);
     ValueTask<byte[]?> GetTcTokenAsync(string jid, CancellationToken ct = default);

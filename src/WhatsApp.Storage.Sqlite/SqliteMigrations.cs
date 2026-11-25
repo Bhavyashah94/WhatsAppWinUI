@@ -195,6 +195,16 @@ internal static class SqliteMigrations
                 max_timestamp INTEGER NOT NULL,
                 PRIMARY KEY (chat_jid, action, device_id)
             );
+            """),
+        new(2, "002_signed_prekeys", """
+            CREATE TABLE IF NOT EXISTS signed_prekeys (
+                id INTEGER NOT NULL,
+                device_id INTEGER NOT NULL DEFAULT 1,
+                key_pair BLOB NOT NULL,
+                signature BLOB NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (id, device_id)
+            );
             """)
     ];
 
