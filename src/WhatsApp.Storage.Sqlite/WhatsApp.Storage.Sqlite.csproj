@@ -5,6 +5,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="WhatsApp.Storage.Sqlite.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\WhatsApp.Protocol\WhatsApp.Protocol.csproj" />
   </ItemGroup>
 

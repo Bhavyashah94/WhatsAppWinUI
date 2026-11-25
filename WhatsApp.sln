@@ -25,6 +25,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WhatsApp.Protocol.Tests", "
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WhatsApp.Api.Tests", "tests\WhatsApp.Api.Tests\WhatsApp.Api.Tests.csproj", "{BA6A5B1C-FBA8-4632-9657-B13CF5A43B0F}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WhatsApp.Storage.Sqlite.Tests", "tests\WhatsApp.Storage.Sqlite.Tests\WhatsApp.Storage.Sqlite.Tests.csproj", "{86EFC33A-0AF3-4FA5-87C6-73A173C04947}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -131,6 +133,18 @@ Global
 		{BA6A5B1C-FBA8-4632-9657-B13CF5A43B0F}.Release|x64.Build.0 = Release|Any CPU
 		{BA6A5B1C-FBA8-4632-9657-B13CF5A43B0F}.Release|x86.ActiveCfg = Release|Any CPU
 		{BA6A5B1C-FBA8-4632-9657-B13CF5A43B0F}.Release|x86.Build.0 = Release|Any CPU
+		{86EFC33A-0AF3-4FA5-87C6-73A173C04947}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{86EFC33A-0AF3-4FA5-87C6-73A173C04947}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{86EFC33A-0AF3-4FA5-87C6-73A173C04947}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{86EFC33A-0AF3-4FA5-87C6-73A173C04947}.Debug|x64.Build.0 = Debug|Any CPU
+		{86EFC33A-0AF3-4FA5-87C6-73A173C04947}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{86EFC33A-0AF3-4FA5-87C6-73A173C04947}.Debug|x86.Build.0 = Debug|Any CPU
+		{86EFC33A-0AF3-4FA5-87C6-73A173C04947}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{86EFC33A-0AF3-4FA5-87C6-73A173C04947}.Release|Any CPU.Build.0 = Release|Any CPU
+		{86EFC33A-0AF3-4FA5-87C6-73A173C04947}.Release|x64.ActiveCfg = Release|Any CPU
+		{86EFC33A-0AF3-4FA5-87C6-73A173C04947}.Release|x64.Build.0 = Release|Any CPU
+		{86EFC33A-0AF3-4FA5-87C6-73A173C04947}.Release|x86.ActiveCfg = Release|Any CPU
+		{86EFC33A-0AF3-4FA5-87C6-73A173C04947}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -144,5 +158,6 @@ Global
 		{6F805B4F-EE03-4533-A84E-3D72CB64F910} = {1787FE1D-075E-9E68-7218-25F1BD1BBEAB}
 		{80214F52-8055-48B8-9B8C-C71F8DF95679} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{BA6A5B1C-FBA8-4632-9657-B13CF5A43B0F} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{86EFC33A-0AF3-4FA5-87C6-73A173C04947} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal

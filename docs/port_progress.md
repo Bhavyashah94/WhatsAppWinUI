@@ -1,7 +1,7 @@
 ﻿# WhatsAppWinUI Port Progress & Inventory
 
-> Single source of truth for the 1:1 port of `oxidezap/whatsapp-rust` to native .NET 9 / WinUI 3 in `WhatsAppWinUI`.
-> Tracks 100% of upstream production crates (11), source files (581), and production functions/APIs cross-referenced against C# implementations.
+> Upstream `oxidezap/whatsapp-rust` crate & function reference inventory (`11` crates, `581` source files, `11,265` functions).
+> **Note:** Active `.NET 10` Option A solution layout (`WhatsApp.WaProto`, `WhatsApp.Protocol`, `WhatsApp.Transport`, `WhatsApp.Storage.Sqlite`, `WhatsApp.Api`, `apps/WhatsApp.Cli`) and current Phase 0–7 progress are tracked in [`docs/MASTER_PLAN.md`](MASTER_PLAN.md) and [`README.md`](../README.md); paths like `wacore/` / `storages/` below reflect the initial pre-consolidation mapping.
 
 ---
 

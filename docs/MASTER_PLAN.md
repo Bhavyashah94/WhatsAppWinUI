@@ -96,8 +96,12 @@ src/WhatsApp.Api          src/WhatsApp.Storage.Sqlite   src/WhatsApp.Transport
 * **2C (`SenderKey` Group E2EE):** Added `SenderKeyDistributionMessage`, `SenderKeyMessage`, and `SenderKeyCipher` (`"WhisperGroup"` HKDF-48B, XEdDSA signatures, SKDM replay preservation, bounded group skipped seeds).
 * **2D (`PreKeyManager` & Serialization):** Added `PreKeyManager` (OTP batch generation, SPK rotation, SHA-1 `digestKey` hash) and protobuf `SignalStateCodec` (`SessionStructure` / `SenderKeyRecordStructure`).
 
-### Phase 3 — Normalized SQLite Backend (`src/WhatsApp.Storage.Sqlite`)
-* Implement `SqliteBackend : IWhatsAppBackend` using WAL mode, pooled connections, normalized tables (`device`, `signal_sessions`, `signal_identities`, `prekeys`, `signed_prekeys`, `sender_keys`, `lid_pn_map`, `device_list_cache`, `tc_tokens`, `appstate_*`, `chats`, `contacts`, `groups`, `messages`, `active_message_ranges`), and batched transactions.
+### Phase 3 — Normalized SQLite Backend (`src/WhatsApp.Storage.Sqlite`) ✅
+* Unified normalized WAL schema cross-verified against both live `web.whatsapp.com` IndexedDB (`signal-storage` v90, `model-storage` v2180) and `whatsapp-rust` SQLite migrations (`device_id` multi-account scoped, `@c.us` → `@s.whatsapp.net` normalization, `active_message_ranges` keyed by `(chat_jid, action, device_id)`).
+* **3A (`SqliteOptions`, `SqliteMigrations`, `SqliteRunner`):** Thread-safe lazy initialization gate, `PRAGMA journal_mode = WAL; synchronous = NORMAL; foreign_keys = ON; busy_timeout = 5000`, `BEGIN IMMEDIATE` write-transaction runner with `SQLITE_BUSY`/`SQLITE_LOCKED` exponential backoff retry, and 17 normalized tables in `001_initial_schema`.
+* **3B (`SqliteDeviceStore`, `SqliteSignalStore`):** Persists `DeviceCredentials` (64-byte `private || public` keypairs, pairing reset via `ClearPairingAsync`) plus `signal_sessions` (`SignalStateCodec`), `signal_identities`, batched `prekeys`, and group `sender_keys`.
+* **3C (`SqliteAppSyncStore`, `SqliteProtocolStore`, `SqliteMsgSecretStore`):** Single-transaction atomic `CommitPatchAsync` (version + 128B LTHash + removed/added MACs), `lid_pn_mapping`, `device_list_cache`, `tc_tokens`, and partial-indexed `msg_secrets` expiration cleanup.
+* **3D (`SqliteHistoryStore`):** Transactional `HistorySyncBatch` ingestion (`lid_pn_mapping`, `contacts`/pushnames, `chats`, `messages`, automatic `active_message_ranges` stitching), cursor pagination (`beforeTimestamp` + `limit`), monotonic range expansion, and synthetic live-Web shape tests. *(Note: add `signed_prekeys` history table before implementing Signed PreKey rotation in Phase 4/6.)*
 
 ### Phase 4 — Stanza Router, Handshake Lifecycle & Cold-Boot Coordinator (`src/WhatsApp.Api`)
 * Implement `IqClient` (correlated `<iq id>` TCS table with generation cancellation + timeout) and `StanzaRouter` (`<iq>`, `<ib>`, `<message>`, `<receipt>`, `<notification>`, `<ack>`, `<failure>`).
