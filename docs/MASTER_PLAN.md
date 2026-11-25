@@ -112,14 +112,37 @@ src/WhatsApp.Api          src/WhatsApp.Storage.Sqlite   src/WhatsApp.Transport
 ### Phase 5 — AppState (`syncd`) + LTHash Engine (`src/WhatsApp.Protocol/AppState/` + `WhatsApp.Api`) ✅
 * Implemented `LtHash.cs` (128B HKDF-SHA256 `"WhatsApp Patch Integrity"` LE uint16 pointwise add/subtract matching live `WALTHash` & `wacore-appstate`), `AppStateKeys.cs` (160B HKDF-SHA256 `"WhatsApp Mutation Keys"` 5x32B subkeys), `AppStateHasher.cs` (HMAC-SHA512 truncated 32B content MAC + HMAC-SHA256 snapshot/patch MAC + 32-bit `to64BitNetworkOrder` version encoding + `indexMode` double-subtraction guard), `AppStateMutationCodec.cs`, `AppStatePatchParser.cs`, `AppStateProcessor.cs`, and `SyncdCoordinator.cs` (external snapshot/mutation download via `IHttpClient` + `MediaCipher`, `has_more_patches` pagination, `PushNameSetting` persistence, `409` conflict absorb/rebuild, `SnapshotMacDiverged` automatic snapshot recovery). Verified against upstream `wacore-appstate`, live `web.whatsapp.com`, and bidirectional Rust↔C# interop (`221` offline C# MSTest tests passing).
 
-### Phase 6 — Messaging, Media Pipeline & On-Demand PDO (`WhatsApp.Api` + `WhatsApp.Protocol`)
-* Inbound `<message>` decryption (`pkmsg`/`msg`/`skmsg`/`DeviceSentMessage`), `LidPnCache`, retry receipts, `PLACEHOLDER_MESSAGE_RESEND` PDO fallback.
-* Outbound 1:1 & group E2EE sending (`usync` device fan-out, SKDM distribution, `DeviceSentMessage`).
-* Initial HistorySync (`Chunks 0..N`) + `PdoHistoryClient` (`ProtocolMessage(31)` -> `HistorySyncOnDemandRequest` correlated by `peerDataRequestSessionId`) + monotonic `active_message_ranges` interval stitching.
+### Phase 6 — Live Web Schema Parity, Alt Pairing & Core Stanza Glue (`WhatsApp.WaProto`, `WhatsApp.Protocol`, `WhatsApp.Storage.Sqlite`, `WhatsApp.Api`)
+* **6A (Live Web `.pb` Sync & Storage Extensions):** Port fields present on live `web.whatsapp.com` (`WAWebProtobufs*` / `WAWebProtobufSyncAction.pb`) that are missing from `whatsapp.proto` (`DraftMessageSync`, `ConversationDraft`, `HistorySyncConfig.supportDraftSync`, `HistorySync.omittedConversationMetadata*`, `SyncActionValue.businessFolderChatPreferenceAction`, `ClientPairingProps.isCompanionPairingProgressUiEnabled`, missing `ProtocolMessage.Type` enum values, `HandshakeMessage` PQ extensions), and add `signed_prekeys` rotation history table to `SqliteMigrations` (`002_signed_prekeys_and_chat_features.sql`).
+* **6B (Pair-by-Phone-Code, KeyShare & Transport Glue):** Implement `PairCodeCrypto` + `link_code_companion_reg` companion linking flow (`PairByCodeAsync`); wire incoming `ProtocolMessage.AppStateSyncKeyShare` + `HistorySync` key shares -> `IAppSyncStore.SaveSyncKeyAsync`; wire `ConnectionOrchestrator` `<notification type="server_sync">` & `account_sync` dirty bits -> `SyncdCoordinator`; parse `abprops` server config, `tctoken` privacy tokens, and `media_conn` multi-host failover responses.
+* **6C (`<notification>` Router, Contacts, `@username` & `usync`):** Implement `<notification>` handlers (`devices`/`encrypt` identity-change session invalidation + device refresh, `w:gp2` membership changes triggering automatic `SenderKey` rotation, `picture`/`business`/`disappearing_mode`), `LidPnCache`, `@username` -> LID resolution (`w:username` / `getLIDByUsername` + `peer_recipient_username`), `UsyncClient`, and `w:profile:picture` avatar fetching.
 
-### Phase 7 — Headless Verification Harness (`apps/WhatsApp.Cli`)
-* Prove end-to-end headless CLI flows before starting WinUI 3:
-  1. Single-attempt QR pairing + initial bootstrap sync.
-  2. Clean disconnect + cold-boot Noise IK reconnect (offline drain + `syncd`).
-  3. Live 1:1 & group message send/receive.
+### Phase 7 — E2EE Messaging, Rich Content, Media Pipeline & History/PDO (`WhatsApp.Protocol`, `WhatsApp.Api`, `WhatsApp.Storage.Sqlite`)
+* **7A (1:1 & Group E2EE Messaging + Retry/Backfill):** Inbound `<message>` decryption (`pkmsg`/`msg`/`skmsg`/`DeviceSentMessage`), outbound 1:1 & group fan-out (`usync` device list + `SKDM` distribution + `DeviceSentMessage`), Signal retry receipts, `MediaRetryNotification`, and `PLACEHOLDER_MESSAGE_RESEND` PDO fallback.
+* **7B (Rich Messages, Add-ons, DraftSync, Presence & Receipts):** Quotes/replies, Reactions (`enc_reaction`), Message Edits (`MESSAGE_EDIT`), Revokes (`REVOKE` / `ADMIN_REVOKE`), Pin-in-Chat (`pinInChatMessage`), Keep-in-Chat, Polls (`pollCreationMessage` V1–V6 + `pollAddOptionMessage` + votes), Events (`eventMessage` / `encEventResponseMessage`), Stickers/Packs, Albums, Locations/Live Location, Disappearing/ViewOnce/Spoiler (`conditionalRevealMessage`), DraftSync, `IMsgSecretStore` verification, `<presence>`, `<chatstate>` (typing/recording), and `read`/`played` receipts.
+* **7C (Full Media CDN Pipeline & History/PDO):** Encrypted & plaintext MMS HTTP upload/download (`MediaCipher`, multi-host failover via `media_conn`, resumable uploads, progressive thumbnails), pairing-time `HistorySync` chunk pipeline (`INITIAL_BOOTSTRAP`, `PUSH_NAME`, `RECENT`, `NON_BLOCKING_DATA`), and `PdoHistoryClient` (`ProtocolMessage` -> `HISTORY_SYNC_ON_DEMAND` `syncType = 6` + monotonic `active_message_ranges` stitching).
+
+### Phase 8 — Groups, Communities & Statuses / Stories (`WhatsApp.Protocol`, `WhatsApp.Api`)
+* **8A (Groups & Group History Sharing):** Full `w:g2` group management (create, join, leave, invite links/revokes, promote/demote/remove, membership approval requests, ephemeral/announce/locked settings, `GroupHistoryToggleAction`, `GroupRootKeyShare`, group mentions).
+* **8B (Communities):** Community create/metadata (`community_create`), linked announcement group (`CAG`), subgroup link/unlink, community member & admin synchronization.
+* **8C (Statuses / Stories):** Status v3 (`status@broadcast`) send/receive (text, media, music, sticker interactions, question/answers), `GroupStatusMessageV2`, `StatusPrivacyAction`, and `UserStatusMuteAction`.
+
+### Phase 9 — Channels (Newsletters), Business Suite & Meta AI / Bots (`WhatsApp.Protocol`, `WhatsApp.Api`)
+* **9A (Newsletters / Channels):** MEX GraphQL (`w:mex`) + newsletter IQs (create, follow/unfollow, mute, search/directory, metadata, server updates), plaintext newsletter CDN media (`/mms/newsletter-*`), channel reactions/polls/admin invites/scheduled posts.
+* **9B (Business, Catalogs, Labels, Quick Replies & Blocking):** Business verified-name/profile IQs, Product Catalog/Orders/Carts (`productMessage`, `orderMessage`), Labels (`LabelEditAction`, `LabelAssociationAction`, `LabelReorderingAction`, `LabelSublistAction`), Quick Replies (`QuickReplyAction`), and full `BlocklistIq` runtime integration.
+* **9C (Meta AI / Bot Invocation & Feedback):** Support `botInvokeMessage`, `richResponseMessage`, `aiPsiMetadata`, `aiQueryFanout`, and `botFeedbackMessage` across 1:1 and group contexts.
+
+### Phase 10 — VoIP & WebRTC Calling (`WhatsApp.Calling` + `WhatsApp.Api`)
+* Native C#/Windows WebRTC media & ICE/DTLS-SRTP stack + full `<call>` stanza state machine (`offer`, `preaccept`, `accept`, `relaylatency`, `transport`, `mute`, `video`, `reject`, `terminate`, group calls), E2EE call-key exchange, `PrivacySettingRelayAllCalls`, and `CallLogAction` history sync.
+* *(Mobile SIM/SMS/Passkey primary-phone registration is excluded as an Android/iOS primary-device-only flow; companion linking uses QR + Phone Number Pairing Code.)*
+
+### Phase 11 — End-to-End Headless Verification Harness (`apps/WhatsApp.Cli`)
+* Prove all core & advanced headless CLI flows live against WhatsApp servers before writing any XAML/WinUI 3 UI:
+  1. Single-attempt QR & Phone-Code pairing + `AppStateSyncKeyShare` + initial bootstrap `HistorySync`.
+  2. Clean disconnect + cold-boot Noise IK reconnect (offline drain + `syncd` + `<notification>` sync).
+  3. Live 1:1, group, rich add-ons (reactions/edits/polls/events), and media upload/download.
   4. On-demand PDO (`syncType = 6`) historical backfill.
+  5. Community/Newsletter/Status/Business actions + live VoIP call setup/teardown.
+
+### Phase 12 — WinUI 3 Desktop Client (`apps/WhatsApp.Desktop`)
+* Native Windows 11 WinUI 3 client consuming `WhatsApp.Api` commands and `WhatsAppEvent` channels strictly over the clean UI boundary.

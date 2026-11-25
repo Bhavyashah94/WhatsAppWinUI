@@ -43,8 +43,13 @@ src/WhatsApp.WaProto             -> Self-contained Grpc.Tools protoc codegen fro
 | **Phase 3** | Normalized WAL SQLite persistence (`WhatsApp.Storage.Sqlite`: all 6 `IWhatsAppBackend` stores unified across Web IndexedDB & Rust schemas) | Complete |
 | **Phase 4** | Correlated `IqClient`, `StanzaRouter`, QR & ADV `PairingCrypto`/`PairingHandler`, `KeepaliveWatchdog`, `OfflineBatchCoordinator`, `PreKeyUploader`, and `ConnectionOrchestrator` | Complete |
 | **Phase 5** | AppState (`syncd`) + 128B HKDF-SHA256 `LtHash` engine (`AppStateKeys`, `AppStateHasher`, `AppStateMutationCodec`, `AppStatePatchParser`, `AppStateProcessor`, `SyncdCoordinator`) | Complete |
-| **Phase 6** | End-to-end 1:1/group messaging, Media pipeline, on-demand PDO backfill | Planned |
-| **Phase 7+** | End-to-end CLI verification & native WinUI 3 client | Planned |
+| **Phase 6** | Live Web `.pb` sync, Pair-by-Phone-Code, `AppStateSyncKeyShare`/dirty-bit glue, `media_conn`/`tctoken`, `<notification>` router, `@username`/`usync` | Next |
+| **Phase 7** | 1:1/group E2EE messaging, retry/PDO backfill, rich messages (reactions/edits/revokes/polls/events/pins/drafts), MMS upload/download, `HistorySync` | Planned |
+| **Phase 8** | Full Groups + Group History Sharing, Communities (`CAG` & subgroups), Statuses/Stories (`status@broadcast` & `GroupStatusV2`) | Planned |
+| **Phase 9** | Channels/Newsletters (`w:mex` & plaintext media), Business profiles/Catalogs/Labels/Quick Replies/Blocking, Meta AI/Bots | Planned |
+| **Phase 10** | VoIP & WebRTC Calling (`<call>` signaling, ICE/TURN/DTLS-SRTP media loop, group calls, call logs) | Planned |
+| **Phase 11** | End-to-end headless CLI live verification harness (`apps/WhatsApp.Cli`) | Planned |
+| **Phase 12** | Native Windows 11 WinUI 3 Desktop Client (`apps/WhatsApp.Desktop`) | Planned |
 
 See [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md) for detailed design invariants and milestone plans.
 
