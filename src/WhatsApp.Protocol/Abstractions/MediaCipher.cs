@@ -22,6 +22,14 @@ public enum WaMediaType
     ProductCatalogImage,
     MusicArtwork,
     NewsletterMusicArtwork,
+    NewsletterImage,
+    NewsletterVideo,
+    NewsletterAudio,
+    NewsletterPtt,
+    NewsletterDocument,
+    NewsletterSticker,
+    NewsletterGif,
+    NewsletterLinkThumbnail,
     Ptt,
     Gif
 }
@@ -66,6 +74,14 @@ public static class MediaCipher
         WaMediaType.ProductCatalogImage => "product-catalog-image",
         WaMediaType.MusicArtwork => "music-artwork",
         WaMediaType.NewsletterMusicArtwork => "newsletter-music-artwork",
+        WaMediaType.NewsletterImage => "newsletter-image",
+        WaMediaType.NewsletterVideo => "newsletter-video",
+        WaMediaType.NewsletterAudio => "newsletter-audio",
+        WaMediaType.NewsletterPtt => "newsletter-ptt",
+        WaMediaType.NewsletterDocument => "newsletter-document",
+        WaMediaType.NewsletterSticker => "newsletter-sticker",
+        WaMediaType.NewsletterGif => "newsletter-gif",
+        WaMediaType.NewsletterLinkThumbnail => "newsletter-thumbnail-link",
         _ => throw new ArgumentOutOfRangeException(nameof(mediaType), mediaType, "Unsupported WaMediaType")
     };
 
@@ -84,11 +100,26 @@ public static class MediaCipher
         WaMediaType.ProductCatalogImage => "/product/image",
         WaMediaType.MusicArtwork => "/mms/music-artwork",
         WaMediaType.NewsletterMusicArtwork => "/mms/newsletter-music-artwork",
+        WaMediaType.NewsletterImage or WaMediaType.NewsletterSticker => "/mms/newsletter-image",
+        WaMediaType.NewsletterVideo or WaMediaType.NewsletterGif => "/mms/newsletter-video",
+        WaMediaType.NewsletterAudio or WaMediaType.NewsletterPtt => "/mms/newsletter-audio",
+        WaMediaType.NewsletterDocument => "/mms/newsletter-document",
+        WaMediaType.NewsletterLinkThumbnail => "/mms/newsletter-thumbnail-link",
         _ => throw new ArgumentOutOfRangeException(nameof(mediaType), mediaType, "Unsupported WaMediaType")
     };
 
     public static bool IsEncrypted(this WaMediaType mediaType) =>
-        mediaType is not (WaMediaType.ProductCatalogImage or WaMediaType.NewsletterMusicArtwork);
+        mediaType is not (
+            WaMediaType.ProductCatalogImage
+            or WaMediaType.NewsletterMusicArtwork
+            or WaMediaType.NewsletterImage
+            or WaMediaType.NewsletterVideo
+            or WaMediaType.NewsletterAudio
+            or WaMediaType.NewsletterPtt
+            or WaMediaType.NewsletterDocument
+            or WaMediaType.NewsletterSticker
+            or WaMediaType.NewsletterGif
+            or WaMediaType.NewsletterLinkThumbnail);
 
     public static bool UsesSidecar(this WaMediaType mediaType) =>
         mediaType is WaMediaType.Audio or WaMediaType.Ptt or WaMediaType.Video or WaMediaType.Gif;

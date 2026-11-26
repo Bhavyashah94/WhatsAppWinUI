@@ -175,8 +175,10 @@ public static class PrivacyIq
     }
 }
 
+public sealed record BlocklistEntry(Jid Jid, ulong? TimestampSeconds);
+
 /// <summary>
-/// Blocklist IQ builder (<c>xmlns="blocklist"</c>).
+/// Blocklist IQ builder and parser (<c>xmlns="blocklist"</c>).
 /// </summary>
 public static class BlocklistIq
 {
@@ -198,5 +200,40 @@ public static class BlocklistIq
         }
 
         return StanzaBuilder.Iq(iqId, "set", Xmlns, StanzaBuilder.ServerPn, new Node("item", attrs));
+    }
+
+    public static IReadOnlyList<BlocklistEntry> ParseGetBlocklistResponse(Node response)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        Node container = response.GetChild("list") ?? response;
+        var entries = new List<BlocklistEntry>();
+        foreach (Node item in container.GetChildren("item"))
+        {
+            if (item.GetAttr("jid") is { Length: > 0 } jidStr && Jid.TryParse(jidStr, out Jid jid))
+            {
+                ulong? ts = ulong.TryParse(item.GetAttr("t"), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out ulong parsedTs)
+                    ? parsedTs
+                    : null;
+                entries.Add(new BlocklistEntry(jid, ts));
+            }
+        }
+        return entries;
+    }
+
+    public static IReadOnlyList<(Jid Jid, bool Blocked)> ParseBlocklistNotification(Node notification)
+    {
+        ArgumentNullException.ThrowIfNull(notification);
+        Node container = notification.GetChild("list") ?? notification;
+        var items = new List<(Jid, bool)>();
+        foreach (Node item in container.GetChildren("item"))
+        {
+            if (item.GetAttr("jid") is { Length: > 0 } jidStr && Jid.TryParse(jidStr, out Jid jid))
+            {
+                string? action = item.GetAttr("action");
+                bool blocked = !string.Equals(action, "unblock", StringComparison.OrdinalIgnoreCase);
+                items.Add((jid, blocked));
+            }
+        }
+        return items;
     }
 }

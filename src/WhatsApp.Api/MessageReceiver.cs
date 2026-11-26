@@ -62,6 +62,12 @@ public sealed class MessageReceiver
 
         await LearnSenderMappingsAsync(parsed, ct).ConfigureAwait(false);
 
+        if (parsed.From.IsNewsletter())
+        {
+            await HandleNewsletterPlaintextAsync(parsed, ct).ConfigureAwait(false);
+            return;
+        }
+
         if (parsed.EncPayloads.Count == 0)
         {
             await SendAckOrDeliveryReceiptAsync(parsed, hideDelivery: false, ct).ConfigureAwait(false);
@@ -86,8 +92,18 @@ public sealed class MessageReceiver
         {
             try
             {
-                byte[] padded = await DecryptEncPayloadAsync(enc, chatBare, senderDev, senderAddr, ct).ConfigureAwait(false);
-                Message message = MessageFraming.DecodeAndUnpadMessage(padded);
+                Message message;
+                if (string.Equals(enc.EncType, "msmsg", StringComparison.Ordinal))
+                {
+                    // Bot msmsg envelopes are AES-256-GCM over unpadded protobuf Message bytes (no PKCS7 padding).
+                    byte[] rawProto = await DecryptMsmsgAsync(parsed, enc, senderDev, ct).ConfigureAwait(false);
+                    message = Message.Parser.ParseFrom(rawProto);
+                }
+                else
+                {
+                    byte[] padded = await DecryptEncPayloadAsync(enc, chatBare, senderDev, senderAddr, ct).ConfigureAwait(false);
+                    message = MessageFraming.DecodeAndUnpadMessage(padded);
+                }
 
                 bool fromMe = IsOwnUser(senderDev.User);
                 string effectiveChat = chatBare;
@@ -310,6 +326,86 @@ public sealed class MessageReceiver
             default:
                 throw new NotSupportedException($"Unsupported Signal enc type '{enc.EncType}'.");
         }
+    }
+
+    private async Task<byte[]> DecryptMsmsgAsync(
+        IncomingMessageStanza parsed,
+        EncryptedMessagePayload enc,
+        Jid senderDev,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(parsed.MetaTargetId))
+        {
+            throw new CryptographicException($"msmsg stanza '{parsed.Id}' missing <meta target_id>.");
+        }
+
+        (byte[] Secret, long? Timestamp)? stored = await _backend.MsgSecrets.GetMsgSecretAsync(parsed.MetaTargetId, ct).ConfigureAwait(false);
+        if (stored is not { Secret.Length: 32 } entry)
+        {
+            throw new CryptographicException($"No stored messageSecret for msmsg target_id '{parsed.MetaTargetId}'.");
+        }
+
+        var senderCandidates = new List<string>(4);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void AddCandidate(string? s)
+        {
+            if (!string.IsNullOrWhiteSpace(s) && seen.Add(s))
+            {
+                senderCandidates.Add(s);
+            }
+        }
+
+        if (parsed.MetaTargetSenderJid is Jid ts)
+        {
+            foreach (string cand in BuildJidCandidates(ts.ToNonAdString(), includeOwn: true))
+            {
+                AddCandidate(cand);
+            }
+        }
+        else if (parsed.From.Server == Server.Bot || senderDev.IsFbidBot())
+        {
+            AddCandidate(_credentials.Lid?.ToNonAdString());
+            AddCandidate(_credentials.Pn?.ToNonAdString());
+        }
+        else
+        {
+            AddCandidate(_credentials.Pn?.ToNonAdString());
+            AddCandidate(_credentials.Lid?.ToNonAdString());
+        }
+
+        if (senderCandidates.Count == 0)
+        {
+            throw new CryptographicException($"Unable to resolve target_sender for msmsg stanza '{parsed.Id}'.");
+        }
+
+        string botUserJid = senderDev.ToNonAdString();
+        bool preferEditTarget = parsed.BotInfo?.EditType is BotEditType.Inner or BotEditType.Last
+            && !string.IsNullOrEmpty(parsed.BotInfo.EditTargetId);
+        string primaryMsgId = preferEditTarget ? parsed.BotInfo!.EditTargetId! : parsed.Id;
+        string? fallbackMsgId = preferEditTarget ? parsed.Id : parsed.BotInfo?.EditTargetId;
+        if (string.Equals(fallbackMsgId, primaryMsgId, StringComparison.Ordinal))
+        {
+            fallbackMsgId = null;
+        }
+
+        CryptographicException? lastAuthFailure = null;
+        foreach (string targetSenderUser in senderCandidates)
+        {
+            var primaryCtx = new BotMessageContext(primaryMsgId, targetSenderUser, botUserJid);
+            BotMessageContext? fallbackCtx = fallbackMsgId is not null
+                ? new BotMessageContext(fallbackMsgId, targetSenderUser, botUserJid)
+                : null;
+            try
+            {
+                return BotMessageCrypto.DecryptMsmsgEnvelope(enc.Ciphertext, entry.Secret, primaryCtx, fallbackCtx);
+            }
+            catch (CryptographicException ex)
+            {
+                lastAuthFailure = ex;
+            }
+        }
+
+        throw lastAuthFailure ?? new CryptographicException($"msmsg decryption failed for stanza '{parsed.Id}'.");
     }
 
     private async Task ProcessSideEffectsAndPersistAsync(
@@ -631,6 +727,56 @@ public sealed class MessageReceiver
                     ml.HasLabelTimestamp ? ml.LabelTimestamp : parsed.TimestampSeconds,
                     parsed.TimestampSeconds)).ConfigureAwait(false);
             }
+            else if (pm.Type == Message.Types.ProtocolMessage.Types.Type.BotFeedbackMessage && pm.BotFeedbackMessage is { } fb)
+            {
+                await _emitEvent(new BotFeedbackReceivedEvent(
+                    chatBare,
+                    senderBare,
+                    parsed.Id,
+                    fb.MessageKey?.Id ?? string.Empty,
+                    fb.Kind,
+                    fb.HasText ? fb.Text : null,
+                    fb.HasKindNegative ? fb.KindNegative : null,
+                    fb.HasKindPositive ? fb.KindPositive : null,
+                    parsed.TimestampSeconds)).ConfigureAwait(false);
+            }
+            else if (pm.Type == Message.Types.ProtocolMessage.Types.Type.AiPsiMetadata && pm.HasAiPsiMetadata)
+            {
+                await _emitEvent(new BotPsiMetadataReceivedEvent(
+                    chatBare,
+                    senderBare,
+                    parsed.Id,
+                    pm.AiPsiMetadata.ToByteArray(),
+                    parsed.TimestampSeconds)).ConfigureAwait(false);
+            }
+            else if (pm.Type == Message.Types.ProtocolMessage.Types.Type.AiQueryFanout && pm.AiQueryFanout is { } fanout)
+            {
+                string? fanoutText = fanout.Message is { } fm ? ExtractReadableText(fm) : null;
+                await _emitEvent(new BotQueryFanoutReceivedEvent(
+                    chatBare,
+                    senderBare,
+                    parsed.Id,
+                    fanout.MessageKey?.Id,
+                    fanout.HasTimestamp ? fanout.Timestamp : null,
+                    fanoutText,
+                    parsed.TimestampSeconds)).ConfigureAwait(false);
+            }
+        }
+
+        if (m.RichResponseMessage is { } rich)
+        {
+            ParsedBotRichResponse parsedRich = BotStanzas.ExtractRichResponse(rich);
+            BotMetadata? botMeta = message.MessageContextInfo?.BotMetadata;
+            await _emitEvent(new BotRichResponseReceivedEvent(
+                chatBare,
+                senderBare,
+                parsed.Id,
+                parsedRich,
+                botMeta?.HasPersonaId == true ? botMeta.PersonaId : null,
+                botMeta?.HasBotResponseId == true ? botMeta.BotResponseId : null,
+                parsed.BotInfo?.EditTargetId,
+                parsed.BotInfo?.EditType,
+                parsed.TimestampSeconds)).ConfigureAwait(false);
         }
 
         if (m.StatusQuestionAnswerMessage is { Key: { Id.Length: > 0 } qaKey } qa)
@@ -978,27 +1124,98 @@ public sealed class MessageReceiver
             QuotedMessageId: quotedId, QuotedSenderJid: quotedSender, QuotedText: quotedText);
     }
 
-    private static ContextInfo? ExtractContextInfo(Message m) =>
-        m.ExtendedTextMessage?.ContextInfo
-        ?? m.ImageMessage?.ContextInfo
-        ?? m.VideoMessage?.ContextInfo
-        ?? m.AudioMessage?.ContextInfo
-        ?? m.DocumentMessage?.ContextInfo
-        ?? m.StickerMessage?.ContextInfo
-        ?? m.MusicMessage?.ContextInfo;
+    private static ContextInfo? ExtractContextInfo(Message m)
+    {
+        Message cur = MessageStanzas.UnwrapClassificationMessage(m);
+        return cur.ExtendedTextMessage?.ContextInfo
+            ?? cur.ImageMessage?.ContextInfo
+            ?? cur.VideoMessage?.ContextInfo
+            ?? cur.AudioMessage?.ContextInfo
+            ?? cur.DocumentMessage?.ContextInfo
+            ?? cur.StickerMessage?.ContextInfo
+            ?? cur.MusicMessage?.ContextInfo
+            ?? cur.NewsletterAdminInviteMessage?.ContextInfo
+            ?? cur.NewsletterFollowerInviteMessageV2?.ContextInfo
+            ?? cur.ProductMessage?.ContextInfo
+            ?? cur.OrderMessage?.ContextInfo
+            ?? cur.RichResponseMessage?.ContextInfo;
+    }
 
-    private static string? ExtractReadableText(Message m) =>
-        m.HasConversation
-            ? m.Conversation
-            : (m.ExtendedTextMessage is { HasText: true } ext
+    private static string? ExtractReadableText(Message m)
+    {
+        Message u = MessageStanzas.UnwrapClassificationMessage(m);
+        return u.HasConversation
+            ? u.Conversation
+            : (u.ExtendedTextMessage is { HasText: true } ext
                 ? ext.Text
-                : (m.PollCreationMessage ?? m.PollCreationMessageV2 ?? m.PollCreationMessageV3 ?? m.PollCreationMessageV5 ?? m.PollCreationMessageV6)?.Name
-                    ?? (m.EventMessage is { HasName: true } evt ? evt.Name : null)
-                    ?? (m.LocationMessage is { } loc ? (loc.HasName ? loc.Name : (loc.HasAddress ? loc.Address : $"{loc.DegreesLatitude},{loc.DegreesLongitude}")) : null)
-                    ?? (m.LiveLocationMessage is { HasCaption: true } live ? live.Caption : null)
-                    ?? (m.MusicMessage?.EmbeddedMusic is { } em ? $"{em.Author} - {em.Title}" : null)
-                    ?? (m.StatusQuestionAnswerMessage is { HasText: true } sqa ? sqa.Text : null)
-                    ?? (m.ReactionMessage is { HasText: true } rx ? rx.Text : null));
+                : (u.PollCreationMessage ?? u.PollCreationMessageV2 ?? u.PollCreationMessageV3 ?? u.PollCreationMessageV5 ?? u.PollCreationMessageV6)?.Name
+                    ?? (u.EventMessage is { HasName: true } evt ? evt.Name : null)
+                    ?? (u.LocationMessage is { } loc ? (loc.HasName ? loc.Name : (loc.HasAddress ? loc.Address : $"{loc.DegreesLatitude},{loc.DegreesLongitude}")) : null)
+                    ?? (u.LiveLocationMessage is { HasCaption: true } live ? live.Caption : null)
+                    ?? (u.MusicMessage?.EmbeddedMusic is { } em ? $"{em.Author} - {em.Title}" : null)
+                    ?? (u.NewsletterAdminInviteMessage is { } nai ? (nai.HasCaption ? nai.Caption : (nai.HasNewsletterName ? nai.NewsletterName : null)) : null)
+                    ?? (u.NewsletterFollowerInviteMessageV2 is { } nfi ? (nfi.HasCaption ? nfi.Caption : (nfi.HasNewsletterName ? nfi.NewsletterName : null)) : null)
+                    ?? (u.ProductMessage is { } pm ? (pm.Product?.HasTitle == true ? pm.Product.Title : (pm.HasBody ? pm.Body : null)) : null)
+                    ?? (u.OrderMessage is { } om ? (om.HasOrderTitle ? om.OrderTitle : (om.HasMessage ? om.Message : (om.HasOrderId ? $"Order {om.OrderId}" : null))) : null)
+                    ?? (u.RichResponseMessage is { } rich ? BotStanzas.ExtractRichResponse(rich).SummaryText : null)
+                    ?? (u.StatusQuestionAnswerMessage is { HasText: true } sqa ? sqa.Text : null)
+                    ?? (u.ReactionMessage is { HasText: true } rx ? rx.Text : null));
+    }
+
+    private async Task HandleNewsletterPlaintextAsync(IncomingMessageStanza parsed, CancellationToken ct)
+    {
+        string chatBare = parsed.From.ToNonAdString();
+        bool isRevoke = string.Equals(parsed.Edit, RichMessageBuilders.EditAttrAdminRevoke, StringComparison.Ordinal);
+
+        if (parsed.PlaintextBytes is { Length: > 0 } ptBytes)
+        {
+            Message msg = Message.Parser.ParseFrom(ptBytes);
+            MessageRecord record = ToMessageRecord(parsed.Id, chatBare, chatBare, fromMe: false, (ulong)parsed.TimestampSeconds, msg);
+            if (string.Equals(parsed.Edit, NewsletterStanzas.EditAttrAdminEdit, StringComparison.Ordinal))
+            {
+                await _backend.History.ApplyMessageEditAsync(chatBare, parsed.Id, record.Text, parsed.TimestampSeconds, ct).ConfigureAwait(false);
+            }
+            await _backend.History.SaveMessageAsync(record, ct).ConfigureAwait(false);
+            await _emitEvent(new NewsletterMessageReceivedEvent(
+                chatBare,
+                parsed.Id,
+                parsed.ServerId ?? 0,
+                parsed.Type,
+                parsed.Edit,
+                IsSender: false,
+                record,
+                parsed.TimestampSeconds,
+                parsed.IsOffline)).ConfigureAwait(false);
+            await _emitEvent(new MessageReceivedEvent(record)).ConfigureAwait(false);
+        }
+        else if (isRevoke)
+        {
+            await _backend.History.MarkMessageRevokedAsync(chatBare, parsed.Id, ct).ConfigureAwait(false);
+            var revokedRecord = new MessageRecord(
+                parsed.Id,
+                chatBare,
+                chatBare,
+                FromMe: false,
+                (ulong)parsed.TimestampSeconds,
+                MessageType.Protocol,
+                Text: null,
+                IsRevoked: true);
+            await _emitEvent(new NewsletterMessageReceivedEvent(
+                chatBare,
+                parsed.Id,
+                parsed.ServerId ?? 0,
+                parsed.Type,
+                parsed.Edit,
+                IsSender: false,
+                revokedRecord,
+                parsed.TimestampSeconds,
+                parsed.IsOffline)).ConfigureAwait(false);
+        }
+
+        await _socket.SendNodeAsync(
+            AckStanza.Build(parsed.Id, "message", parsed.From, parsed.Type, parsed.Participant),
+            ct).ConfigureAwait(false);
+    }
 
     private bool IsOwnUser(string user) =>
         (_credentials.Pn is Jid pn && string.Equals(pn.User, user, StringComparison.Ordinal))

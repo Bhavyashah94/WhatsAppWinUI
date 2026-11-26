@@ -237,3 +237,137 @@ public sealed record CommentReceivedEvent(
     string CommentMessageId,
     MessageRecord Record,
     long TimestampSeconds) : WhatsAppEvent;
+
+// Phase 9A: Newsletter (Channel) Events
+public sealed record NewsletterMessageReceivedEvent(
+    string ChannelJid,
+    string? MessageId,
+    ulong ServerId,
+    string StanzaType,
+    string? EditAttribute,
+    bool IsSender,
+    MessageRecord Record,
+    long TimestampSeconds,
+    bool IsOffline) : WhatsAppEvent;
+
+public sealed record NewsletterLiveUpdateEvent(
+    string ChannelJid,
+    IReadOnlyList<WhatsApp.Protocol.Binary.Stanzas.NewsletterLiveUpdateMessage> Messages,
+    long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record NewsletterMetadataUpdatedEvent(
+    WhatsApp.Protocol.Binary.Stanzas.NewsletterMetadata Metadata,
+    long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record NewsletterJoinedEvent(
+    WhatsApp.Protocol.Binary.Stanzas.NewsletterMetadata Metadata,
+    long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record NewsletterLeftEvent(
+    string ChannelJid,
+    long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record NewsletterDeletedEvent(
+    string ChannelJid,
+    long TimestampSeconds) : WhatsAppEvent;
+
+// Phase 9B: Blocking, Labels, Quick Replies & Business Catalog Events
+public sealed record BlocklistEntryUpdatedEvent(
+    string TargetJid,
+    bool Blocked,
+    long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record BlocklistUpdatedEvent(
+    IReadOnlyList<WhatsApp.Protocol.Binary.Stanzas.BlocklistEntry> Entries,
+    long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record LabelEditUpdatedEvent(
+    string LabelId,
+    string? Name,
+    int? Color,
+    bool Deleted,
+    int? PredefinedId,
+    int? OrderIndex,
+    bool? IsActive,
+    int? ListType,
+    long TimestampMs) : WhatsAppEvent;
+
+public sealed record LabelAssociationUpdatedEvent(
+    string LabelId,
+    string ChatJid,
+    bool Labeled,
+    long TimestampMs) : WhatsAppEvent;
+
+public sealed record MessageLabelAssociationUpdatedEvent(
+    string LabelId,
+    string ChatJid,
+    string MessageId,
+    bool FromMe,
+    bool Labeled,
+    long TimestampMs) : WhatsAppEvent;
+
+public sealed record LabelReorderingUpdatedEvent(
+    IReadOnlyList<int> SortedLabelIds,
+    long TimestampMs) : WhatsAppEvent;
+
+public sealed record LabelSublistUpdatedEvent(
+    int PredefinedId,
+    string ChatJid,
+    bool Removed,
+    int? SubListId,
+    long TimestampMs) : WhatsAppEvent;
+
+public sealed record QuickReplyUpdatedEvent(
+    string Id,
+    string Shortcut,
+    string Message,
+    IReadOnlyList<string> Keywords,
+    int Count,
+    bool Deleted,
+    long TimestampMs) : WhatsAppEvent;
+
+public sealed record CatalogNonceReceivedEvent(
+    string Nonce,
+    long TimestampSeconds) : WhatsAppEvent;
+
+// Phase 9C: Meta AI & Bot Events
+public sealed record BotDirectoryLoadedEvent(
+    WhatsApp.Protocol.Binary.Stanzas.BotList Directory) : WhatsAppEvent;
+
+public sealed record BotRichResponseReceivedEvent(
+    string ChatJid,
+    string SenderJid,
+    string MessageId,
+    WhatsApp.Protocol.Binary.Stanzas.ParsedBotRichResponse RichResponse,
+    string? PersonaId,
+    string? BotResponseId,
+    string? EditTargetId,
+    WhatsApp.Protocol.Binary.Stanzas.BotEditType? EditType,
+    long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record BotPsiMetadataReceivedEvent(
+    string ChatJid,
+    string SenderJid,
+    string MessageId,
+    byte[] AiPsiMetadata,
+    long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record BotFeedbackReceivedEvent(
+    string ChatJid,
+    string SenderJid,
+    string MessageId,
+    string TargetMessageId,
+    Whatsapp.BotFeedbackMessage.Types.BotFeedbackKind Kind,
+    string? Text,
+    ulong? KindNegativeMask,
+    ulong? KindPositiveMask,
+    long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record BotQueryFanoutReceivedEvent(
+    string ChatJid,
+    string SenderJid,
+    string MessageId,
+    string? FanoutMessageId,
+    long? FanoutTimestamp,
+    string? FanoutText,
+    long TimestampSeconds) : WhatsAppEvent;

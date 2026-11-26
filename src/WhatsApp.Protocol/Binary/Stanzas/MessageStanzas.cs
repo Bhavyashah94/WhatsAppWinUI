@@ -27,7 +27,15 @@ public sealed record IncomingMessageStanza(
     string? Category,
     bool IsOffline,
     string? PushName,
-    IReadOnlyList<EncryptedMessagePayload> EncPayloads)
+    IReadOnlyList<EncryptedMessagePayload> EncPayloads,
+    byte[]? PlaintextBytes = null,
+    string? PlaintextMediaType = null,
+    ulong? ServerId = null,
+    bool HasPlaintextNode = false,
+    string? MetaTargetId = null,
+    Jid? MetaTargetSenderJid = null,
+    Jid? MetaTargetChatJid = null,
+    BotStanzaInfo? BotInfo = null)
 {
     public Jid ChatJid => Recipient is { User.Length: > 0 } r ? r.ToNonAd() : From.ToNonAd();
     public Jid SenderDeviceJid => Participant ?? From;
@@ -53,7 +61,12 @@ public static class MessageStanzas
             if (cur.LottieStickerMessage?.Message is { } ls) { cur = ls; continue; }
             if (cur.GroupStatusMessageV2?.Message is { } gs2) { cur = gs2; continue; }
             if (cur.SpoilerMessage?.Message is { } sp) { cur = sp; continue; }
+            if (cur.NewsletterScheduledMessage?.Message is { } nsm) { cur = nsm; continue; }
+            if (cur.NewsletterAdminProfileMessage?.Message is { } nap) { cur = nap; continue; }
             if (cur.BotForwardedMessage?.Message is { } bfm) { cur = bfm; continue; }
+            if (cur.BotInvokeMessage?.Message is { } bim) { cur = bim; continue; }
+            if (cur.BotTaskMessage?.Message is { } btm) { cur = btm; continue; }
+            if (cur.BotGroupParticipantMessage?.Message is { } bgm) { cur = bgm; continue; }
             if (cur.DeviceSentMessage?.Message is { } dsm) { cur = dsm; continue; }
             return cur;
         }
@@ -77,7 +90,9 @@ public static class MessageStanzas
             || m.PollCreationMessageV5 is not null
             || m.PollCreationMessageV6 is not null
             || m.PollUpdateMessage is not null
-            || m.PollAddOptionMessage is not null)
+            || m.PollAddOptionMessage is not null
+            || m.PollResultSnapshotMessage is not null
+            || m.PollResultSnapshotMessageV3 is not null)
         {
             return "poll";
         }
@@ -104,6 +119,8 @@ public static class MessageStanzas
             || m.StatusStickerInteractionMessage is not null
             || m.StatusQuotedMessage is not null
             || m.AlbumMessage is not null
+            || m.NewsletterAdminInviteMessage is not null
+            || m.NewsletterFollowerInviteMessageV2 is not null
             || m.RichResponseMessage is not null)
         {
             return "text";
@@ -147,6 +164,7 @@ public static class MessageStanzas
             || m.ProtocolMessage?.Type == Message.Types.ProtocolMessage.Types.Type.GroupMemberLabelChange
             || m.ProtocolMessage?.Type == Message.Types.ProtocolMessage.Types.Type.EphemeralSyncResponse
             || m.ProtocolMessage?.Type == Message.Types.ProtocolMessage.Types.Type.RequestWelcomeMessage
+            || m.ProtocolMessage?.Type == Message.Types.ProtocolMessage.Types.Type.BotFeedbackMessage
             || m.MessageHistoryNotice is not null
             || m.ReactionMessage is not null
             || m.EncReactionMessage is not null
@@ -564,6 +582,36 @@ public static class MessageStanzas
             }
         }
 
+        Node? plaintextNode = stanza.GetChild("plaintext");
+        byte[]? plaintextBytes = plaintextNode?.Content switch
+        {
+            NodeContent.BytesContent bc when bc.Bytes.Length > 0 => bc.Bytes,
+            _ => null
+        };
+        string? plaintextMediaType = plaintextNode?.GetAttr("mediatype");
+        ulong? serverId = ulong.TryParse(stanza.GetAttr("server_id"), NumberStyles.Integer, CultureInfo.InvariantCulture, out ulong parsedSid)
+            ? parsedSid
+            : null;
+
+        Node? metaNode = stanza.GetChild("meta");
+        string? metaTargetId = metaNode?.GetAttr("target_id");
+        Jid? metaTargetSenderJid = metaNode is not null ? TryParseAttrJid(metaNode, "target_sender_jid") : null;
+        Jid? metaTargetChatJid = metaNode is not null ? TryParseAttrJid(metaNode, "target_chat_jid") : null;
+
+        BotStanzaInfo? botInfo = null;
+        if (stanza.GetChild("bot") is { } botNode)
+        {
+            long? botSenderTs = long.TryParse(botNode.GetAttr("sender_timestamp_ms"), NumberStyles.Integer, CultureInfo.InvariantCulture, out long bts)
+                ? bts
+                : null;
+            botInfo = new BotStanzaInfo(
+                BotStanzas.ParseBotEditType(botNode.GetAttr("edit")),
+                botNode.GetAttr("edit_target_id"),
+                botSenderTs,
+                botNode.GetAttr("biz_bot"),
+                botNode.GetAttr("type"));
+        }
+
         return new IncomingMessageStanza(
             id,
             from,
@@ -579,7 +627,185 @@ public static class MessageStanzas
             stanza.GetAttr("category"),
             stanza.GetAttr("offline") is not null,
             stanza.GetAttr("notify"),
-            encPayloads);
+            encPayloads,
+            plaintextBytes,
+            plaintextMediaType,
+            serverId,
+            plaintextNode is not null,
+            metaTargetId,
+            metaTargetSenderJid,
+            metaTargetChatJid,
+            botInfo);
+    }
+
+    /// <summary>
+    /// Builds an unencrypted newsletter publish stanza (<c>&lt;plaintext&gt;proto&lt;/plaintext&gt;</c>),
+    /// matching WA Web's <c>OutMessagePublishNewsletterRequest</c>.
+    /// Adds newsletter-specific <c>contenttype</c> to poll creation <c>&lt;meta&gt;</c>.
+    /// </summary>
+    public static Node BuildNewsletterPlaintextStanza(
+        string messageId,
+        Jid channelJid,
+        Message message,
+        string? stanzaTypeOverride = null,
+        IReadOnlyList<Node>? extraNodes = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(messageId);
+        ArgumentNullException.ThrowIfNull(message);
+        if (!channelJid.IsNewsletter())
+        {
+            throw new ArgumentException($"Expected a @newsletter JID, got '{channelJid}'.", nameof(channelJid));
+        }
+
+        string stanzaType = string.IsNullOrWhiteSpace(stanzaTypeOverride)
+            ? ClassifyStanzaType(message)
+            : stanzaTypeOverride;
+
+        var plaintextAttrs = new Dictionary<string, NodeValue>(StringComparer.Ordinal);
+        if (ClassifyMediaType(message) is { Length: > 0 } mt)
+        {
+            plaintextAttrs["mediatype"] = mt;
+        }
+
+        var children = new List<Node>
+        {
+            new("plaintext", plaintextAttrs, message.ToByteArray())
+        };
+
+        Node? meta = InferMetaNode(message);
+        Message unwrapped = UnwrapClassificationMessage(message);
+        Message.Types.PollCreationMessage? poll = unwrapped.PollCreationMessageV3
+            ?? unwrapped.PollCreationMessage
+            ?? unwrapped.PollCreationMessageV2
+            ?? unwrapped.PollCreationMessageV5
+            ?? unwrapped.PollCreationMessageV6;
+        if (poll is not null && meta is not null)
+        {
+            var metaAttrs = new Dictionary<string, NodeValue>(meta.Attrs, StringComparer.Ordinal)
+            {
+                ["contenttype"] = poll.PollContentType == Message.Types.PollContentType.Image ? "image" : "text"
+            };
+            meta = new Node("meta", metaAttrs, meta.Content);
+        }
+
+        if (meta is not null && (extraNodes is null || !extraNodes.Any(n => n.Tag == "meta")))
+        {
+            children.Add(meta);
+        }
+
+        if (extraNodes is { Count: > 0 })
+        {
+            children.AddRange(extraNodes);
+        }
+
+        return new Node(
+            "message",
+            new Dictionary<string, NodeValue>(StringComparer.Ordinal)
+            {
+                ["to"] = channelJid.ToNonAd(),
+                ["type"] = stanzaType,
+                ["id"] = messageId
+            },
+            new NodeContent.NodesContent(children));
+    }
+
+    /// <summary>
+    /// Builds a plaintext newsletter edit (<c>edit="3"</c>) or revoke (<c>edit="8"</c>) stanza
+    /// keyed by the target message's stanza <paramref name="messageId"/> (never <c>server_id</c>).
+    /// </summary>
+    public static Node BuildNewsletterEditStanza(
+        Jid channelJid,
+        string messageId,
+        Message? replacementContent)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(messageId);
+        if (!channelJid.IsNewsletter())
+        {
+            throw new ArgumentException($"Expected a @newsletter JID, got '{channelJid}'.", nameof(channelJid));
+        }
+
+        bool isRevoke = replacementContent is null;
+        string editAttr = isRevoke ? RichMessageBuilders.EditAttrAdminRevoke : NewsletterStanzas.EditAttrAdminEdit;
+        string stanzaType = isRevoke ? "text" : ClassifyStanzaType(replacementContent!);
+        byte[] body = isRevoke ? Array.Empty<byte>() : replacementContent!.ToByteArray();
+
+        var plaintextAttrs = new Dictionary<string, NodeValue>(StringComparer.Ordinal);
+        if (!isRevoke && ClassifyMediaType(replacementContent!) is { Length: > 0 } mt)
+        {
+            plaintextAttrs["mediatype"] = mt;
+        }
+
+        return new Node(
+            "message",
+            new Dictionary<string, NodeValue>(StringComparer.Ordinal)
+            {
+                ["to"] = channelJid.ToNonAd(),
+                ["id"] = messageId,
+                ["type"] = stanzaType,
+                ["edit"] = editAttr
+            },
+            new Node[] { new("plaintext", plaintextAttrs, body) });
+    }
+
+    public static Node BuildNewsletterServerReactionStanza(
+        Jid toJid,
+        string requestId,
+        ulong serverId,
+        string reactionCode)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        return new Node(
+            "message",
+            new Dictionary<string, NodeValue>(StringComparer.Ordinal)
+            {
+                ["to"] = toJid.ToNonAd(),
+                ["type"] = "reaction",
+                ["id"] = requestId,
+                ["server_id"] = serverId.ToString(CultureInfo.InvariantCulture)
+            },
+            new Node[]
+            {
+                new("reaction", new Dictionary<string, NodeValue>(StringComparer.Ordinal) { ["code"] = reactionCode ?? string.Empty })
+            });
+    }
+
+    public static Node BuildNewsletterPollVoteStanza(
+        Jid channelJid,
+        string requestId,
+        ulong serverId,
+        IReadOnlyList<byte[]> optionHashes32)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentNullException.ThrowIfNull(optionHashes32);
+        if (!channelJid.IsNewsletter())
+        {
+            throw new ArgumentException($"Expected a @newsletter JID, got '{channelJid}'.", nameof(channelJid));
+        }
+
+        var voteNodes = new Node[optionHashes32.Count];
+        for (int i = 0; i < optionHashes32.Count; i++)
+        {
+            if (optionHashes32[i] is not { Length: 32 } h)
+            {
+                throw new ArgumentException($"Poll vote option hash at index {i} must be 32 bytes.", nameof(optionHashes32));
+            }
+            voteNodes[i] = new Node("vote", h);
+        }
+
+        return new Node(
+            "message",
+            new Dictionary<string, NodeValue>(StringComparer.Ordinal)
+            {
+                ["to"] = channelJid.ToNonAd(),
+                ["id"] = requestId,
+                ["server_id"] = serverId.ToString(CultureInfo.InvariantCulture),
+                ["type"] = "poll"
+            },
+            new Node[]
+            {
+                new("meta", new Dictionary<string, NodeValue>(StringComparer.Ordinal) { ["polltype"] = "vote" }),
+                new("votes", voteNodes)
+            });
     }
 
     private static Jid? TryParseAttrJid(Node node, string attrName) =>

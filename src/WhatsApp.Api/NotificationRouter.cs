@@ -23,6 +23,7 @@ public sealed class NotificationRouter
     private readonly MessageReceiver? _messageReceiver;
     private readonly GroupClient? _groupClient;
     private readonly MediaReuploadCoordinator? _mediaReupload;
+    private readonly BusinessClient? _businessClient;
     private readonly Func<WhatsAppEvent, ValueTask> _emitEvent;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _preKeyUploadGate = new(1, 1);
@@ -38,7 +39,8 @@ public sealed class NotificationRouter
         TimeProvider? timeProvider = null,
         MessageReceiver? messageReceiver = null,
         GroupClient? groupClient = null,
-        MediaReuploadCoordinator? mediaReupload = null)
+        MediaReuploadCoordinator? mediaReupload = null,
+        BusinessClient? businessClient = null)
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _lidPnCache = lidPnCache ?? throw new ArgumentNullException(nameof(lidPnCache));
@@ -49,6 +51,7 @@ public sealed class NotificationRouter
         _messageReceiver = messageReceiver;
         _groupClient = groupClient;
         _mediaReupload = mediaReupload;
+        _businessClient = businessClient;
         _emitEvent = emitEvent ?? throw new ArgumentNullException(nameof(emitEvent));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -104,6 +107,12 @@ public sealed class NotificationRouter
                 break;
             case "privacy":
                 await HandlePrivacyAsync(notification, ts).ConfigureAwait(false);
+                break;
+            case "newsletter":
+                await HandleNewsletterAsync(notification).ConfigureAwait(false);
+                break;
+            case "blocklist":
+                await HandleBlocklistAsync(notification, ts).ConfigureAwait(false);
                 break;
             case "mediaretry":
                 if (_mediaReupload is not null
@@ -579,6 +588,13 @@ public sealed class NotificationRouter
 
     private async Task HandleBusinessAsync(Node notification)
     {
+        if (BusinessStanzas.ParseCatalogNonceNotification(notification) is { } nonce)
+        {
+            _businessClient?.TryResolveCatalogNonceNotification(nonce);
+            long nonceTs = NotificationStanzas.ParseTimestampSeconds(notification, _timeProvider);
+            await _emitEvent(new CatalogNonceReceivedEvent(nonce, nonceTs)).ConfigureAwait(false);
+        }
+
         ParsedBusinessNotification? parsed = NotificationStanzas.ParseBusinessNotification(notification, _timeProvider);
         if (parsed is null)
         {
@@ -592,6 +608,15 @@ public sealed class NotificationRouter
             parsed.VerifiedName,
             parsed.ContactHash,
             parsed.TimestampSeconds)).ConfigureAwait(false);
+    }
+
+    private async Task HandleBlocklistAsync(Node notification, long ts)
+    {
+        IReadOnlyList<(Jid Jid, bool Blocked)> changes = BlocklistIq.ParseBlocklistNotification(notification);
+        foreach (var (jid, blocked) in changes)
+        {
+            await _emitEvent(new BlocklistEntryUpdatedEvent(jid.ToNonAdString(), blocked, ts)).ConfigureAwait(false);
+        }
     }
 
     private async Task HandleStatusAsync(Node notification, long ts)
@@ -628,6 +653,19 @@ public sealed class NotificationRouter
         if (categories.Count > 0)
         {
             await _emitEvent(new PrivacyUpdatedEvent(categories, ts)).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleNewsletterAsync(Node notification)
+    {
+        ParsedNewsletterLiveUpdateNotification? parsed =
+            NewsletterStanzas.ParseLiveUpdateNotification(notification, _timeProvider);
+        if (parsed is not null)
+        {
+            await _emitEvent(new NewsletterLiveUpdateEvent(
+                parsed.ChannelJid.ToNonAdString(),
+                parsed.Messages,
+                parsed.TimestampSeconds)).ConfigureAwait(false);
         }
     }
 

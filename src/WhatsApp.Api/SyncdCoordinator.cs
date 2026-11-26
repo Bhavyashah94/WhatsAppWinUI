@@ -617,10 +617,16 @@ public sealed class SyncdCoordinator : IAsyncDisposable
         {
             if (mutation.Operation == SyncdMutation.Types.SyncdOperation.Remove)
             {
+                long removeTs = mutation.ActionValue?.HasTimestamp == true ? mutation.ActionValue.Timestamp : 0;
                 if (mutation.Index is ["contact", { Length: > 0 } removedJid, ..])
                 {
-                    long removeTs = mutation.ActionValue?.HasTimestamp == true ? mutation.ActionValue.Timestamp : 0;
                     await _emitEventAsync(new ContactRemovedEvent(removedJid, removeTs)).ConfigureAwait(false);
+                }
+                else if (mutation.Index is ["label_sublist", { Length: > 0 } pidStr, { Length: > 0 } sublistChatJid, ..]
+                    && int.TryParse(pidStr, out int pid))
+                {
+                    await _emitEventAsync(new LabelSublistUpdatedEvent(pid, sublistChatJid, Removed: true, SubListId: null, removeTs))
+                        .ConfigureAwait(false);
                 }
                 continue;
             }
@@ -773,6 +779,60 @@ public sealed class SyncdCoordinator : IAsyncDisposable
                     ? av.RemoveRecentStickerAction.LastStickerSentTs
                     : null;
                 await _emitEventAsync(new RemoveRecentStickerUpdatedEvent(mutation.Index[1], lastSent, ts)).ConfigureAwait(false);
+            }
+
+            if (av.LabelEditAction is { } lea && mutation.Index is ["label_edit", { Length: > 0 } editLabelId, ..])
+            {
+                await _emitEventAsync(new LabelEditUpdatedEvent(
+                    editLabelId,
+                    lea.HasName ? lea.Name : null,
+                    lea.HasColor ? lea.Color : null,
+                    lea.HasDeleted && lea.Deleted,
+                    lea.HasPredefinedId ? lea.PredefinedId : null,
+                    lea.HasOrderIndex ? lea.OrderIndex : null,
+                    lea.HasIsActive ? lea.IsActive : null,
+                    lea.HasType ? (int)lea.Type : null,
+                    ts)).ConfigureAwait(false);
+            }
+
+            if (av.LabelAssociationAction is { } laa)
+            {
+                bool labeled = laa.HasLabeled && laa.Labeled;
+                if (mutation.Index is ["label_jid", { Length: > 0 } lJidId, { Length: > 0 } lChatJid, ..])
+                {
+                    await _emitEventAsync(new LabelAssociationUpdatedEvent(lJidId, lChatJid, labeled, ts)).ConfigureAwait(false);
+                }
+                else if (mutation.Index is ["label_message", { Length: > 0 } lMsgLabelId, { Length: > 0 } lMsgChat, { Length: > 0 } lMsgId, ..])
+                {
+                    bool fromMe = mutation.Index.Count >= 5 && string.Equals(mutation.Index[4], "1", StringComparison.Ordinal);
+                    await _emitEventAsync(new MessageLabelAssociationUpdatedEvent(lMsgLabelId, lMsgChat, lMsgId, fromMe, labeled, ts))
+                        .ConfigureAwait(false);
+                }
+            }
+
+            if (av.LabelReorderingAction is { } lra && mutation.Index is ["label_reordering", ..])
+            {
+                await _emitEventAsync(new LabelReorderingUpdatedEvent(lra.SortedLabelIds.ToArray(), ts)).ConfigureAwait(false);
+            }
+
+            if (av.LabelSublistAction is { HasSubListId: true } lsa
+                && mutation.Index is ["label_sublist", { Length: > 0 } setPidStr, { Length: > 0 } setSubChat, ..]
+                && int.TryParse(setPidStr, out int setPid))
+            {
+                await _emitEventAsync(new LabelSublistUpdatedEvent(setPid, setSubChat, Removed: false, lsa.SubListId, ts))
+                    .ConfigureAwait(false);
+            }
+
+            if (av.QuickReplyAction is { } qra && mutation.Index is ["quick_reply", { Length: > 0 } qrId, ..])
+            {
+                await _emitEventAsync(new QuickReplyUpdatedEvent(
+                    qrId,
+                    qra.HasShortcut ? qra.Shortcut : string.Empty,
+                    qra.HasMessage ? qra.Message : string.Empty,
+                    qra.Keywords.ToArray(),
+                    qra.HasCount ? qra.Count : 0,
+                    qra.HasDeleted && qra.Deleted,
+                    ts)).ConfigureAwait(false);
             }
         }
 

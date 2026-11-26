@@ -205,14 +205,28 @@ public sealed class MediaTransferClient
             throw new InvalidOperationException($"Message '{record.Id}' has no DirectPath.");
         }
 
-        WaMediaType mediaType = record.Type switch
-        {
-            WhatsApp.Protocol.HistorySync.MessageType.Image => WaMediaType.Image,
-            WhatsApp.Protocol.HistorySync.MessageType.Sticker => WaMediaType.Sticker,
-            WhatsApp.Protocol.HistorySync.MessageType.Video => WaMediaType.Video,
-            WhatsApp.Protocol.HistorySync.MessageType.Audio => WaMediaType.Audio,
-            _ => WaMediaType.Document
-        };
+        bool isPlaintextNewsletter =
+            record.RemoteJid.EndsWith("@newsletter", StringComparison.OrdinalIgnoreCase)
+            || ((record.MediaKey is null || record.MediaKey.Length == 0)
+                && record.DirectPath.Contains("/newsletter", StringComparison.OrdinalIgnoreCase));
+
+        WaMediaType mediaType = isPlaintextNewsletter
+            ? record.Type switch
+            {
+                WhatsApp.Protocol.HistorySync.MessageType.Image => WaMediaType.NewsletterImage,
+                WhatsApp.Protocol.HistorySync.MessageType.Sticker => WaMediaType.NewsletterSticker,
+                WhatsApp.Protocol.HistorySync.MessageType.Video => WaMediaType.NewsletterVideo,
+                WhatsApp.Protocol.HistorySync.MessageType.Audio => WaMediaType.NewsletterAudio,
+                _ => WaMediaType.NewsletterDocument
+            }
+            : record.Type switch
+            {
+                WhatsApp.Protocol.HistorySync.MessageType.Image => WaMediaType.Image,
+                WhatsApp.Protocol.HistorySync.MessageType.Sticker => WaMediaType.Sticker,
+                WhatsApp.Protocol.HistorySync.MessageType.Video => WaMediaType.Video,
+                WhatsApp.Protocol.HistorySync.MessageType.Audio => WaMediaType.Audio,
+                _ => WaMediaType.Document
+            };
 
         return DownloadAsync(
             record.DirectPath,

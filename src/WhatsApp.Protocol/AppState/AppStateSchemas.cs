@@ -105,4 +105,23 @@ public static class AppStateSchemas
 
     public static readonly AppStateActionSpec RelayAllCalls =
         new("setting_relayAllCalls", AppStateCollections.Regular, 1, 0);
+
+    // ─── Phase 9B: Business Labels & Quick Replies ───────────────────────
+    public static readonly AppStateActionSpec LabelEdit =
+        new("label_edit", AppStateCollections.Regular, 3, 1);
+
+    public static readonly AppStateActionSpec LabelJid =
+        new("label_jid", AppStateCollections.Regular, 3, 2);
+
+    public static readonly AppStateActionSpec LabelMessage =
+        new("label_message", AppStateCollections.Regular, 3, 5);
+
+    public static readonly AppStateActionSpec LabelReordering =
+        new("label_reordering", AppStateCollections.Regular, 3, 0);
+
+    public static readonly AppStateActionSpec LabelSublist =
+        new("label_sublist", AppStateCollections.Regular, 1, 2);
+
+    public static readonly AppStateActionSpec QuickReply =
+        new("quick_reply", AppStateCollections.Regular, 2, 1);
 }

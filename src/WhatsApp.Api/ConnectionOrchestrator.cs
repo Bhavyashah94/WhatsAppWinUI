@@ -75,6 +75,12 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
     private MediaReuploadCoordinator? _activeMediaReupload;
     private CommentClient? _activeComments;
     private BroadcastClient? _activeBroadcasts;
+    private NewsletterClient? _activeNewsletters;
+    private BlockingClient? _activeBlocking;
+    private LabelsClient? _activeLabels;
+    private QuickRepliesClient? _activeQuickReplies;
+    private BusinessClient? _activeBusiness;
+    private BotClient? _activeBots;
     private long _generation;
     private int _disposed;
 
@@ -125,6 +131,12 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
     public MediaReuploadCoordinator? ActiveMediaReupload => Volatile.Read(ref _activeMediaReupload);
     public CommentClient? ActiveComments => Volatile.Read(ref _activeComments);
     public BroadcastClient? ActiveBroadcasts => Volatile.Read(ref _activeBroadcasts);
+    public NewsletterClient? ActiveNewsletters => Volatile.Read(ref _activeNewsletters);
+    public BlockingClient? ActiveBlocking => Volatile.Read(ref _activeBlocking);
+    public LabelsClient? ActiveLabels => Volatile.Read(ref _activeLabels);
+    public QuickRepliesClient? ActiveQuickReplies => Volatile.Read(ref _activeQuickReplies);
+    public BusinessClient? ActiveBusiness => Volatile.Read(ref _activeBusiness);
+    public BotClient? ActiveBots => Volatile.Read(ref _activeBots);
 
     /// <summary>
     /// Starts the managed background connect-and-reconnect loop until stopped, logged out/replaced,
@@ -344,6 +356,12 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             var mediaReupload = new MediaReuploadCoordinator(socket, _backend, _lidPnCache, credentials, EmitEventAsync);
             var commentClient = new CommentClient(messageSender, _backend, credentials, _options.TimeProvider);
             var broadcastClient = new BroadcastClient(iqClient, socket, usync, preKeyFetcher, messageSender, _backend, _lidPnCache, credentials, retryCoordinator);
+            var newsletterClient = new NewsletterClient(iqClient, mexClient, socket, messageSender, _lidPnCache, mediaTransfer, EmitEventAsync, _options.TimeProvider);
+            var blockingClient = new BlockingClient(iqClient, _lidPnCache, EmitEventAsync, _options.TimeProvider);
+            var businessClient = new BusinessClient(iqClient, mexClient, usync, credentials, _options.HttpClient);
+            var botClient = new BotClient(iqClient, mexClient, messageSender, credentials, EmitEventAsync);
+            LabelsClient? labelsClient = syncd is not null ? new LabelsClient(syncd, _options.TimeProvider) : null;
+            QuickRepliesClient? quickRepliesClient = syncd is not null ? new QuickRepliesClient(syncd, _options.TimeProvider) : null;
             AppStateSettingsClient? appStateSettingsClient = syncd is not null ? new AppStateSettingsClient(syncd, _options.TimeProvider) : null;
             ChatActionsClient? chatActionsClient = syncd is not null ? new ChatActionsClient(syncd, messageSender, _options.TimeProvider) : null;
             ContactClient? contactClient = syncd is not null ? new ContactClient(syncd, _lidPnCache, _options.TimeProvider) : null;
@@ -372,6 +390,12 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             Volatile.Write(ref _activeMediaReupload, mediaReupload);
             Volatile.Write(ref _activeComments, commentClient);
             Volatile.Write(ref _activeBroadcasts, broadcastClient);
+            Volatile.Write(ref _activeNewsletters, newsletterClient);
+            Volatile.Write(ref _activeBlocking, blockingClient);
+            Volatile.Write(ref _activeBusiness, businessClient);
+            Volatile.Write(ref _activeBots, botClient);
+            Volatile.Write(ref _activeLabels, labelsClient);
+            Volatile.Write(ref _activeQuickReplies, quickRepliesClient);
             notifications = new NotificationRouter(
                 _backend,
                 _lidPnCache,
@@ -383,7 +407,8 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
                 _options.TimeProvider,
                 messageReceiver,
                 groupClient,
-                mediaReupload);
+                mediaReupload,
+                businessClient);
             Volatile.Write(ref _activeNotifications, notifications);
 
             KeepaliveOptions keepaliveOpts = _options.KeepaliveOptions ?? new KeepaliveOptions
@@ -745,6 +770,12 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             Volatile.Write(ref _activeMediaReupload, null);
             Volatile.Write(ref _activeComments, null);
             Volatile.Write(ref _activeBroadcasts, null);
+            Volatile.Write(ref _activeNewsletters, null);
+            Volatile.Write(ref _activeBlocking, null);
+            Volatile.Write(ref _activeBusiness, null);
+            Volatile.Write(ref _activeBots, null);
+            Volatile.Write(ref _activeLabels, null);
+            Volatile.Write(ref _activeQuickReplies, null);
             sessionStopCts.Cancel();
 
             if (watchdog is not null) await watchdog.DisposeAsync().ConfigureAwait(false);

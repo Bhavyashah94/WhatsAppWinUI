@@ -95,6 +95,173 @@ public static class MexStanzas
         "WAWebMexUpdateTextStatusJobMutation",
         "9152604461510864");
 
+    // ─── Phase 9A: Newsletter (Channel) Persisted Queries & Mutations ───
+    public static readonly MexDoc FetchSubscribedNewsletters = new(
+        "WAWebMexFetchAllNewslettersMetadataJobQuery",
+        "25399611239711790");
+
+    public static readonly MexDoc FetchNewsletter = new(
+        "WAWebMexFetchNewsletterJobQuery",
+        "27456920720571478");
+
+    public static readonly MexDoc FetchNewsletterDehydrated = new(
+        "WAWebMexFetchNewsletterDehydratedJobQuery",
+        "26944199458535748");
+
+    public static readonly MexDoc CreateNewsletter = new(
+        "WAWebMexCreateNewsletterJobMutation",
+        "25149874324715067");
+
+    public static readonly MexDoc JoinNewsletter = new(
+        "WAWebMexJoinNewsletterJobMutation",
+        "24404358912487870");
+
+    public static readonly MexDoc LeaveNewsletter = new(
+        "WAWebMexLeaveNewsletterJobMutation",
+        "9767147403369991");
+
+    public static readonly MexDoc UpdateNewsletter = new(
+        "WAWebMexUpdateNewsletterJobMutation",
+        "24250201037901610");
+
+    public static readonly MexDoc DeleteNewsletter = new(
+        "WAWebMexDeleteNewsletterJobMutation",
+        "30062808666639665");
+
+    public static readonly MexDoc ChangeNewsletterOwner = new(
+        "WAWebMexChangeNewsletterOwnerJobMutation",
+        "9546742745432473");
+
+    public static readonly MexDoc DemoteNewsletterAdmin = new(
+        "WAWebMexDemoteNewsletterAdminJobMutation",
+        "9880997548630971");
+
+    public static readonly MexDoc FetchNewsletterAdminInfo = new(
+        "WAWebMexFetchNewsletterAdminInfoJobQuery",
+        "26278439461859188");
+
+    public static readonly MexDoc FetchNewsletterAdminCapabilities = new(
+        "WAWebMexFetchNewsletterAdminCapabilitiesJobQuery",
+        "9801384413216421");
+
+    public static readonly MexDoc CreateNewsletterAdminInvite = new(
+        "WAWebMexCreateNewsletterAdminInviteJobMutation",
+        "9387141988078609");
+
+    public static readonly MexDoc AcceptNewsletterAdminInvite = new(
+        "WAWebMexAcceptNewsletterAdminInviteJobMutation",
+        "9580828702035549");
+
+    public static readonly MexDoc RevokeNewsletterAdminInvite = new(
+        "WAWebMexRevokeNewsletterAdminInviteJobMutation",
+        "9656078347839416");
+
+    public static readonly MexDoc FetchNewsletterFollowers = new(
+        "WAWebMexFetchNewsletterFollowersJobQuery",
+        "27472091235714801");
+
+    public static readonly MexDoc UpdateNewsletterUserSetting = new(
+        "WAWebMexUpdateNewsletterUserSettingJobMutation",
+        "31938993655691868");
+
+    public static readonly MexDoc UpdateNewsletterAdminProfile = new(
+        "WAWebMexUpdateNewsletterAdminProfileJobMutation",
+        "27871895895845117");
+
+    public static readonly MexDoc UpdateNewsletterAdminProfileSetting = new(
+        "WAWebMexUpdateNewsletterAdminProfileSettingJobMutation",
+        "28226671310350649");
+
+    public static readonly MexDoc FetchNewsletterDirectoryCategoriesPreview = new(
+        "WAWebMexFetchNewsletterDirectoryCategoriesPreviewJobQuery",
+        "35266481849605779");
+
+    public static readonly MexDoc FetchNewsletterDirectoryList = new(
+        "WAWebMexFetchNewsletterDirectoryListJobQuery",
+        "26125047313831973");
+
+    public static readonly MexDoc FetchNewsletterDirectorySearchResults = new(
+        "WAWebMexFetchNewsletterDirectorySearchResultsJobQuery",
+        "26301059626252132");
+
+    public static readonly MexDoc FetchRecommendedNewsletters = new(
+        "WAWebMexFetchRecommendedNewslettersJobQuery",
+        "25806748772361516");
+
+    public static readonly MexDoc FetchSimilarNewsletters = new(
+        "WAWebMexFetchSimilarNewslettersJobQuery",
+        "26217043484590756");
+
+    public static readonly MexDoc NewsletterPinMessages = new(
+        "WAWebMexNewsletterPinMessagesJobMutation",
+        "27165709459706559");
+
+    public static readonly MexDoc NewsletterUnpinMessages = new(
+        "WAWebMexNewsletterUnpinMessagesJobMutation",
+        "28007176042216937");
+
+    public static readonly MexDoc NewsletterAddPaidPartnershipLabel = new(
+        "WAWebMexNewsletterAddPaidPartnershipLabelJobMutation",
+        "26102375079404865");
+
+    public static readonly MexDoc NewsletterLabelAiContent = new(
+        "WAWebMexNewsletterLabelAiContentJobMutation",
+        "27909718265289596");
+
+    // ─── Phase 9B: Business Suite, Catalogs & Orders ─────────────────────
+    public static readonly MexDoc BizQueryCatalog = new(
+        "WAWebQueryCatalogQuery",
+        "29516483177936279");
+
+    public static readonly MexDoc BizQueryOwnerCatalog = new(
+        "WAWebBizCatalogManagementFetchCatalogQuery",
+        "9957894520961099");
+
+    public static readonly MexDoc BizQueryCollections = new(
+        "WAWebQueryProductCollectionsQuery",
+        "29398139243143451");
+
+    public static readonly MexDoc BizQueryOwnerCollections = new(
+        "WAWebBizCatalogManagementFetchCollectionsQuery",
+        "9687699931342731");
+
+    public static readonly MexDoc BizQueryCatalogProduct = new(
+        "WAWebQueryCatalogProductQuery",
+        "28846496438335971");
+
+    public static readonly MexDoc BizQueryOrder = new(
+        "WAWebBizQueryOrderJobQuery",
+        "26593811266898374");
+
+    public static readonly MexDoc BizCreateOrder = new(
+        "WAWebBizCreateOrderJobMutation",
+        "26486627094287046");
+
+    public static readonly MexDoc EditBizProfile = new(
+        "WAWebEditBizProfileMutation",
+        "26652989367627867");
+
+    // ─── Phase 9C: Meta AI & Bots ────────────────────────────────────────
+    public static readonly MexDoc FetchBotProfilesGql = new(
+        "WAWebFetchBotProfilesGQLQuery",
+        "26368585139502858");
+
+    public static readonly MexDoc FetchBotCertificateRevocationList = new(
+        "WAWebMexFetchBotCertificateRevocationListQuery",
+        "35807917542188393");
+
+    public static readonly MexDoc FetchDynamicAiModes = new(
+        "WAWebFetchDynamicAIModesQuery",
+        "25335662402775799");
+
+    public static readonly MexDoc FetchGroupInfoIncludBots = new(
+        "WAWebMexFetchGroupInfoIncludBotsJobQuery",
+        "28713479051667101");
+
+    public static readonly MexDoc AiAgentAutoReplyControl = new(
+        "WAWebAiAgentAutoReplyControlMutation",
+        "27338647792432014");
+
     public static Node BuildQuery(string iqId, MexDoc doc, object variables)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(iqId);

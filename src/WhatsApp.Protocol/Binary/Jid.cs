@@ -194,4 +194,9 @@ public readonly record struct Jid(string User, Server Server, byte Agent = 0, us
 
     public Jid ToNonAd() => new(User, Server);
     public string ToNonAdString() => $"{User}@{Server.ToServerString()}";
+    public bool IsNewsletter() => Server == Server.Newsletter;
+    public bool IsFbidBot() => Server == Server.Bot && Device == 0;
+    public bool IsPnBot() => Server == Server.Pn && Device == 0
+        && (User.StartsWith("1313555", StringComparison.Ordinal) || User.StartsWith("131655500", StringComparison.Ordinal));
+    public bool IsBot() => IsFbidBot() || IsPnBot();
 }

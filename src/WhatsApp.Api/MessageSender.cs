@@ -73,6 +73,10 @@ public sealed class MessageSender
     {
         ArgumentException.ThrowIfNullOrEmpty(text);
         var msg = new Message { Conversation = text };
+        if (toJid.IsNewsletter())
+        {
+            return SendNewsletterMessageAsync(toJid, msg, messageId, ct: ct);
+        }
         if (toJid.IsGroup())
         {
             if (groupParticipants is null)
@@ -83,6 +87,41 @@ public sealed class MessageSender
         }
 
         return SendDmAsync(toJid, msg, messageId, includeReportingToken: includeReportingToken, ct: ct);
+    }
+
+    public async Task<SendMessageResult> SendNewsletterMessageAsync(
+        Jid channelJid,
+        Message message,
+        string? messageId = null,
+        string? stanzaTypeOverride = null,
+        IReadOnlyList<Node>? extraNodes = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        if (!channelJid.IsNewsletter())
+        {
+            throw new ArgumentException($"Expected a @newsletter JID, got '{channelJid}'.", nameof(channelJid));
+        }
+
+        string msgId = string.IsNullOrWhiteSpace(messageId) ? NextMessageId() : messageId;
+        Jid channelBare = channelJid.ToNonAd();
+        Node stanza = MessageStanzas.BuildNewsletterPlaintextStanza(
+            msgId,
+            channelBare,
+            message,
+            stanzaTypeOverride,
+            extraNodes);
+
+        var (_, errCode, errText) = await SendWithOptionalAckWaitAsync(stanza, msgId, awaitServerAck, ct).ConfigureAwait(false);
+        if (!string.IsNullOrEmpty(errCode))
+        {
+            throw new InvalidOperationException($"Newsletter publish failed for '{msgId}': error={errCode} ({errText ?? "unknown"})");
+        }
+
+        string ownBare = (_credentials.Lid ?? _credentials.Pn)?.ToNonAdString() ?? channelBare.ToString();
+        await PersistSentMetadataAsync(msgId, channelBare.ToString(), ownBare, message, messageSecret32: null, ct).ConfigureAwait(false);
+        return new SendMessageResult(msgId, channelBare.ToString(), TargetDeviceCount: 0, Phash: null);
     }
 
     public async Task<SendMessageResult> SendDmAsync(
@@ -961,7 +1000,7 @@ public sealed class MessageSender
 
     private Jid GetOwnUserForAddressing(Jid recipientBare)
     {
-        if (recipientBare.IsLid() && _credentials.Lid is Jid lid)
+        if ((recipientBare.IsLid() || recipientBare.Server == Server.Bot) && _credentials.Lid is Jid lid)
         {
             return lid.ToNonAd();
         }

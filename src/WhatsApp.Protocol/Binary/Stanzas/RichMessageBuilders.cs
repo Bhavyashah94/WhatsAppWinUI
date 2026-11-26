@@ -476,6 +476,187 @@ public static class RichMessageBuilders
         };
     }
 
+    /// <summary>
+    /// Builds a plaintext newsletter poll (no <c>MessageContextInfo.MessageSecret</c> or <c>EncKey</c>),
+    /// matching <c>wacore</c> / WA Web channel poll creation semantics.
+    /// </summary>
+    public static Message BuildNewsletterPollCreation(
+        string question,
+        IReadOnlyList<string> options,
+        uint selectableOptionsCount = 1,
+        string? quizCorrectOption = null,
+        long? endTimeSeconds = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(question);
+        ArgumentNullException.ThrowIfNull(options);
+        if (options.Count < 2 || options.Count > 12)
+        {
+            throw new ArgumentException("A newsletter poll requires between 2 and 12 options.", nameof(options));
+        }
+
+        var poll = new Message.Types.PollCreationMessage
+        {
+            Name = question,
+            SelectableOptionsCount = selectableOptionsCount,
+            PollContentType = Message.Types.PollContentType.Text,
+            PollType = quizCorrectOption is not null ? Message.Types.PollType.Quiz : Message.Types.PollType.Poll
+        };
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string opt in options)
+        {
+            if (string.IsNullOrWhiteSpace(opt) || !seen.Add(opt))
+            {
+                throw new ArgumentException("Newsletter poll options must be non-empty and distinct.", nameof(options));
+            }
+            poll.Options.Add(new Message.Types.PollCreationMessage.Types.Option { OptionName = opt });
+        }
+
+        if (!string.IsNullOrEmpty(quizCorrectOption))
+        {
+            if (!seen.Contains(quizCorrectOption))
+            {
+                throw new ArgumentException("Quiz correct option must match one of the poll options.", nameof(quizCorrectOption));
+            }
+            poll.CorrectAnswer = new Message.Types.PollCreationMessage.Types.Option { OptionName = quizCorrectOption };
+        }
+
+        if (endTimeSeconds is long endTs && endTs > 0)
+        {
+            poll.EndTime = endTs;
+        }
+
+        return new Message { PollCreationMessageV3 = poll };
+    }
+
+    public static Message BuildNewsletterAdminInvite(
+        Jid newsletterJid,
+        string newsletterName,
+        string? caption = null,
+        long? inviteExpirationSeconds = null,
+        byte[]? jpegThumbnail = null)
+    {
+        if (!newsletterJid.IsNewsletter())
+        {
+            throw new ArgumentException($"Expected @newsletter JID, got '{newsletterJid}'.", nameof(newsletterJid));
+        }
+        ArgumentException.ThrowIfNullOrWhiteSpace(newsletterName);
+
+        var msg = new Message.Types.NewsletterAdminInviteMessage
+        {
+            NewsletterJid = newsletterJid.ToNonAdString(),
+            NewsletterName = newsletterName
+        };
+        if (!string.IsNullOrEmpty(caption)) msg.Caption = caption;
+        if (inviteExpirationSeconds is long exp) msg.InviteExpiration = exp;
+        if (jpegThumbnail is { Length: > 0 }) msg.JpegThumbnail = ByteString.CopyFrom(jpegThumbnail);
+        return new Message { NewsletterAdminInviteMessage = msg };
+    }
+
+    public static Message BuildNewsletterFollowerInvite(
+        Jid newsletterJid,
+        string newsletterName,
+        string? caption = null,
+        byte[]? jpegThumbnail = null)
+    {
+        if (!newsletterJid.IsNewsletter())
+        {
+            throw new ArgumentException($"Expected @newsletter JID, got '{newsletterJid}'.", nameof(newsletterJid));
+        }
+        ArgumentException.ThrowIfNullOrWhiteSpace(newsletterName);
+
+        var msg = new Message.Types.NewsletterFollowerInviteMessage
+        {
+            NewsletterJid = newsletterJid.ToNonAdString(),
+            NewsletterName = newsletterName
+        };
+        if (!string.IsNullOrEmpty(caption)) msg.Caption = caption;
+        if (jpegThumbnail is { Length: > 0 }) msg.JpegThumbnail = ByteString.CopyFrom(jpegThumbnail);
+        return new Message { NewsletterFollowerInviteMessageV2 = msg };
+    }
+
+    public static Message WrapNewsletterScheduled(Message inner)
+    {
+        ArgumentNullException.ThrowIfNull(inner);
+        return new Message
+        {
+            NewsletterScheduledMessage = new Message.Types.FutureProofMessage { Message = inner.Clone() }
+        };
+    }
+
+    public static Message BuildProductMessage(
+        Jid businessOwnerJid,
+        string productId,
+        string title,
+        string? description = null,
+        long? priceAmount1000 = null,
+        string? currencyCode = null,
+        string? retailerId = null,
+        string? url = null,
+        long? salePriceAmount1000 = null,
+        string? body = null,
+        string? footer = null,
+        Message.Types.ImageMessage? productImage = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(productId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(title);
+
+        var snapshot = new Message.Types.ProductMessage.Types.ProductSnapshot
+        {
+            ProductId = productId,
+            Title = title
+        };
+        if (!string.IsNullOrEmpty(description)) snapshot.Description = description;
+        if (priceAmount1000 is long p) snapshot.PriceAmount1000 = p;
+        if (!string.IsNullOrEmpty(currencyCode)) snapshot.CurrencyCode = currencyCode;
+        if (!string.IsNullOrEmpty(retailerId)) snapshot.RetailerId = retailerId;
+        if (!string.IsNullOrEmpty(url)) snapshot.Url = url;
+        if (salePriceAmount1000 is long sp) snapshot.SalePriceAmount1000 = sp;
+        if (productImage is not null) snapshot.ProductImage = productImage.Clone();
+
+        var pm = new Message.Types.ProductMessage
+        {
+            BusinessOwnerJid = businessOwnerJid.ToNonAdString(),
+            Product = snapshot
+        };
+        if (!string.IsNullOrEmpty(body)) pm.Body = body;
+        if (!string.IsNullOrEmpty(footer)) pm.Footer = footer;
+        return new Message { ProductMessage = pm };
+    }
+
+    public static Message BuildOrderMessage(
+        string orderId,
+        string token,
+        Jid sellerJid,
+        int itemCount,
+        long? totalAmount1000 = null,
+        string? totalCurrencyCode = null,
+        string? orderTitle = null,
+        string? message = null,
+        Message.Types.OrderMessage.Types.OrderStatus status = Message.Types.OrderMessage.Types.OrderStatus.Inquiry,
+        byte[]? thumbnail = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(orderId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(token);
+
+        var order = new Message.Types.OrderMessage
+        {
+            OrderId = orderId,
+            Token = token,
+            SellerJid = sellerJid.ToNonAdString(),
+            ItemCount = itemCount,
+            Status = status,
+            Surface = Message.Types.OrderMessage.Types.OrderSurface.Catalog,
+            MessageVersion = 2
+        };
+        if (totalAmount1000 is long amt) order.TotalAmount1000 = amt;
+        if (!string.IsNullOrEmpty(totalCurrencyCode)) order.TotalCurrencyCode = totalCurrencyCode;
+        if (!string.IsNullOrEmpty(orderTitle)) order.OrderTitle = orderTitle;
+        if (!string.IsNullOrEmpty(message)) order.Message = message;
+        if (thumbnail is { Length: > 0 }) order.Thumbnail = ByteString.CopyFrom(thumbnail);
+        return new Message { OrderMessage = order };
+    }
+
     public static Message BuildDraftMessageSync(
         Jid chatJid,
         string? draftText,
@@ -570,4 +751,150 @@ public static class RichMessageBuilders
         || message.PollCreationMessageV6 is not null
             ? message
             : null;
+
+    /// <summary>
+    /// Wraps a prompt or message in <c>Message.BotInvokeMessage</c> and attaches a 32-byte
+    /// <c>MessageContextInfo.MessageSecret</c> plus <see cref="BotMetadata"/> so the bot's
+    /// <c>&lt;enc type="msmsg"&gt;</c> reply can be decrypted.
+    /// </summary>
+    public static Message BuildBotInvokeMessage(
+        Message innerMessage,
+        string? invokerJid = null,
+        string? personaId = null,
+        byte[]? messageSecret32 = null,
+        IReadOnlyList<string>? mentionedJids = null)
+    {
+        ArgumentNullException.ThrowIfNull(innerMessage);
+        byte[] secret = messageSecret32 is { Length: 32 } ? messageSecret32 : RandomNumberGenerator.GetBytes(32);
+
+        Message wrappedInner = innerMessage.Clone();
+        if (mentionedJids is { Count: > 0 })
+        {
+            if (wrappedInner.HasConversation && wrappedInner.ExtendedTextMessage is null)
+            {
+                wrappedInner.ExtendedTextMessage = new Message.Types.ExtendedTextMessage
+                {
+                    Text = wrappedInner.Conversation
+                };
+                wrappedInner.ClearConversation();
+            }
+            if (wrappedInner.ExtendedTextMessage is { } ext)
+            {
+                ext.ContextInfo ??= new ContextInfo();
+                foreach (string j in mentionedJids)
+                {
+                    ext.ContextInfo.MentionedJid.Add(j);
+                }
+            }
+        }
+
+        var botMeta = new BotMetadata();
+        if (!string.IsNullOrEmpty(invokerJid)) botMeta.InvokerJid = invokerJid;
+        if (!string.IsNullOrEmpty(personaId)) botMeta.PersonaId = personaId;
+
+        var ctx = new MessageContextInfo
+        {
+            MessageSecret = ByteString.CopyFrom(secret),
+            BotMetadata = botMeta
+        };
+
+        return new Message
+        {
+            BotInvokeMessage = new Message.Types.FutureProofMessage { Message = wrappedInner },
+            MessageContextInfo = ctx
+        };
+    }
+
+    public static Message BuildBotAiPsiMetadataMessage(byte[] aiPsiMetadata, string? invokerJid = null)
+    {
+        ArgumentNullException.ThrowIfNull(aiPsiMetadata);
+        var proto = new Message.Types.ProtocolMessage
+        {
+            Type = Message.Types.ProtocolMessage.Types.Type.AiPsiMetadata,
+            AiPsiMetadata = ByteString.CopyFrom(aiPsiMetadata)
+        };
+        if (!string.IsNullOrEmpty(invokerJid)) proto.InvokerJid = invokerJid;
+        return new Message { ProtocolMessage = proto };
+    }
+
+    public static Message BuildBotAiQueryFanoutMessage(AIQueryFanout fanout, string? invokerJid = null)
+    {
+        ArgumentNullException.ThrowIfNull(fanout);
+        var proto = new Message.Types.ProtocolMessage
+        {
+            Type = Message.Types.ProtocolMessage.Types.Type.AiQueryFanout,
+            AiQueryFanout = fanout.Clone()
+        };
+        if (!string.IsNullOrEmpty(invokerJid)) proto.InvokerJid = invokerJid;
+        return new Message { ProtocolMessage = proto };
+    }
+
+    public static Message BuildBotFeedbackMessage(
+        MessageKey botResponseKey,
+        BotFeedbackMessage.Types.BotFeedbackKind kind,
+        string? text = null,
+        ulong? kindNegativeMask = null,
+        ulong? kindPositiveMask = null,
+        BotFeedbackMessage.Types.ReportKind reportKind = BotFeedbackMessage.Types.ReportKind.None,
+        BotFeedbackMessage.Types.SideBySideSurveyMetadata? surveyMetadata = null)
+    {
+        ArgumentNullException.ThrowIfNull(botResponseKey);
+        var fb = new BotFeedbackMessage
+        {
+            MessageKey = botResponseKey.Clone(),
+            Kind = kind
+        };
+        if (!string.IsNullOrEmpty(text)) fb.Text = text;
+        if (kindNegativeMask is ulong neg) fb.KindNegative = neg;
+        if (kindPositiveMask is ulong pos) fb.KindPositive = pos;
+        if (reportKind != BotFeedbackMessage.Types.ReportKind.None) fb.KindReport = reportKind;
+        if (surveyMetadata is not null) fb.SideBySideSurveyMetadata = surveyMetadata.Clone();
+
+        return new Message
+        {
+            ProtocolMessage = new Message.Types.ProtocolMessage
+            {
+                Type = Message.Types.ProtocolMessage.Types.Type.BotFeedbackMessage,
+                BotFeedbackMessage = fb
+            }
+        };
+    }
+
+    public static Message BuildBotRequestWelcomeMessage(
+        Message.Types.RequestWelcomeMessageMetadata.Types.WelcomeTrigger? trigger = null,
+        Message.Types.RequestWelcomeMessageMetadata.Types.LocalChatState? localChatState = null)
+    {
+        var proto = new Message.Types.ProtocolMessage
+        {
+            Type = Message.Types.ProtocolMessage.Types.Type.RequestWelcomeMessage
+        };
+
+        if (trigger is not null || localChatState is not null)
+        {
+            var meta = new Message.Types.RequestWelcomeMessageMetadata();
+            if (trigger is { } t) meta.WelcomeTrigger = t;
+            if (localChatState is { } s) meta.LocalChatState = s;
+            proto.RequestWelcomeMessageMetadata = meta;
+        }
+        return new Message { ProtocolMessage = proto };
+    }
+
+    public static Message BuildRichResponseText(
+        IReadOnlyList<(AIRichResponseSubMessageType Type, string? Text, string? CodeLanguage)> segments,
+        AIRichResponseMessageType messageType = AIRichResponseMessageType.AiRichResponseTypeStandard)
+    {
+        ArgumentNullException.ThrowIfNull(segments);
+        var rich = new AIRichResponseMessage { MessageType = messageType };
+        foreach (var (segType, text, lang) in segments)
+        {
+            var sub = new AIRichResponseSubMessage { MessageType = segType };
+            if (!string.IsNullOrEmpty(text)) sub.MessageText = text;
+            if (segType == AIRichResponseSubMessageType.AiRichResponseCode && !string.IsNullOrEmpty(lang))
+            {
+                sub.CodeMetadata = new AIRichResponseCodeMetadata { CodeLanguage = lang };
+            }
+            rich.Submessages.Add(sub);
+        }
+        return new Message { RichResponseMessage = rich };
+    }
 }
