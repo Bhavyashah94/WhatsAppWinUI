@@ -236,7 +236,8 @@ public static class RetryAndMediaRetryStanzas
         bool fromMe,
         byte[] encryptedPayload,
         byte[] iv12,
-        Jid? participant = null)
+        Jid? participant = null,
+        Jid? ownFromJid = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(messageId);
         var rmrAttrs = new Dictionary<string, NodeValue>(StringComparer.Ordinal)
@@ -255,6 +256,10 @@ public static class RetryAndMediaRetryStanzas
             ["to"] = StanzaBuilder.ServerPn,
             ["type"] = "server-error"
         };
+        if (ownFromJid is Jid own)
+        {
+            attrs["from"] = own;
+        }
 
         return new Node("receipt", attrs, new Node[]
         {

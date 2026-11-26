@@ -509,6 +509,59 @@ public static class RichMessageBuilders
         };
     }
 
+    public static Message BuildEphemeralSetting(uint expirationSeconds, long settingTimestampSeconds = 0) =>
+        new()
+        {
+            ProtocolMessage = new Message.Types.ProtocolMessage
+            {
+                Type = Message.Types.ProtocolMessage.Types.Type.EphemeralSetting,
+                EphemeralExpiration = expirationSeconds,
+                EphemeralSettingTimestamp = settingTimestampSeconds
+            }
+        };
+
+    public static Message BuildMemberLabelMessage(string label, long labelTimestampSeconds)
+    {
+        ArgumentNullException.ThrowIfNull(label);
+        return new Message
+        {
+            ProtocolMessage = new Message.Types.ProtocolMessage
+            {
+                Type = Message.Types.ProtocolMessage.Types.Type.GroupMemberLabelChange,
+                MemberLabel = new MemberLabel
+                {
+                    Label = label,
+                    LabelTimestamp = labelTimestampSeconds
+                }
+            }
+        };
+    }
+
+    public static Message BuildGroupInviteMessage(
+        Jid groupJid,
+        string inviteCode,
+        long inviteExpirationSeconds,
+        string groupName,
+        string? caption = null,
+        Message.Types.GroupInviteMessage.Types.GroupType groupType = Message.Types.GroupInviteMessage.Types.GroupType.Default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(inviteCode);
+        ArgumentException.ThrowIfNullOrWhiteSpace(groupName);
+        var inv = new Message.Types.GroupInviteMessage
+        {
+            GroupJid = groupJid.ToNonAdString(),
+            InviteCode = inviteCode,
+            InviteExpiration = inviteExpirationSeconds,
+            GroupName = groupName,
+            GroupType = groupType
+        };
+        if (!string.IsNullOrEmpty(caption))
+        {
+            inv.Caption = caption;
+        }
+        return new Message { GroupInviteMessage = inv };
+    }
+
     public static Message? TryGetPollCreationMessage(Message message) =>
         message.PollCreationMessage is not null
         || message.PollCreationMessageV2 is not null

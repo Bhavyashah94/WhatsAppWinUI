@@ -46,7 +46,28 @@ public sealed record MessageRecord(
     string? DirectPath = null,
     byte[]? MediaKey = null,
     byte[]? FileHash = null,
-    byte[]? FileEncHash = null
+    byte[]? FileEncHash = null,
+    string? QuotedMessageId = null,
+    string? QuotedSenderJid = null,
+    string? QuotedText = null,
+    long? EditedTimestamp = null,
+    bool IsRevoked = false,
+    ulong? FileLength = null,
+    string? ReactionsJson = null
+);
+
+public sealed record ChatSummary(
+    string ChatJid,
+    string? Name,
+    uint UnreadCount,
+    ulong LastMsgTimestamp,
+    bool Archived,
+    bool Pinned = false,
+    long? MuteEndTimestamp = null,
+    string? DraftText = null,
+    long? DraftTimestampMs = null,
+    string? LastMessageText = null,
+    MessageType LastMessageType = MessageType.Unknown
 );
 
 public sealed record ConversationRecord(

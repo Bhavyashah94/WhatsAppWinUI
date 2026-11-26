@@ -92,6 +92,21 @@ public sealed record ParsedAccountSyncNotification(
     string? UsernameAction,
     long TimestampSeconds);
 
+public sealed record ParsedGroupAction(
+    string Action,
+    IReadOnlyList<Jid> ParticipantJids,
+    IReadOnlyList<Jid> ParticipantPnJids,
+    string? Subject = null,
+    string? Description = null,
+    string? DescriptionId = null,
+    uint? EphemeralExpiration = null,
+    bool? ToggleValue = null,
+    string? ModeValue = null,
+    string? PrevAddressingMode = null,
+    IReadOnlyList<Jid>? LinkedGroupJids = null,
+    string? LinkKind = null,
+    string? UnlinkReason = null);
+
 public sealed record ParsedGroupNotification(
     Jid From,
     string? StanzaId,
@@ -103,7 +118,9 @@ public sealed record ParsedGroupNotification(
     IReadOnlyList<Jid> ParticipantJids,
     IReadOnlyList<Jid> ParticipantPnJids,
     string? Subject,
-    bool? RotateSenderKeyRequired);
+    bool? RotateSenderKeyRequired,
+    IReadOnlyList<ParsedGroupAction>? Actions = null,
+    string? AddressingMode = null);
 
 public sealed record ParsedMexNotification(
     Jid From,
@@ -546,26 +563,92 @@ public static class NotificationStanzas
         Node? actionNode = (notification.Content as NodeContent.NodesContent)?.Nodes.FirstOrDefault();
         string action = actionNode?.Tag ?? "unknown";
         Jid? actor = TryParseAttrJid(notification, "participant") ?? TryParseAttrJid(notification, "author");
+        string? addressingMode = notification.GetAttr("addressing_mode");
 
-        var participantJids = new List<Jid>();
-        var participantPns = new List<Jid>();
-        if (actionNode is not null)
+        var actions = new List<ParsedGroupAction>();
+        var allParticipantJids = new List<Jid>();
+        var allParticipantPns = new List<Jid>();
+        bool rotateSenderKey = false;
+
+        if (notification.Content is NodeContent.NodesContent nc)
         {
-            foreach (Node p in actionNode.GetChildren("participant"))
+            foreach (Node act in nc.Nodes)
             {
-                if (TryParseAttrJid(p, "jid") is Jid pj)
+                var pJids = new List<Jid>();
+                var pPns = new List<Jid>();
+                foreach (Node p in act.GetChildren("participant"))
                 {
-                    participantJids.Add(pj);
+                    if (TryParseAttrJid(p, "jid") is Jid pj)
+                    {
+                        pJids.Add(pj);
+                        allParticipantJids.Add(pj);
+                    }
+                    if (TryParseAttrJid(p, "phone_number") is Jid pn)
+                    {
+                        pPns.Add(pn);
+                        allParticipantPns.Add(pn);
+                    }
                 }
-                if (TryParseAttrJid(p, "phone_number") is Jid pn)
+
+                string? actSubject = act.GetAttr("subject");
+                string? actDesc = act.GetChild("body")?.Content switch
                 {
-                    participantPns.Add(pn);
+                    NodeContent.StringContent sc => sc.Text,
+                    NodeContent.BytesContent bc => Encoding.UTF8.GetString(bc.Bytes),
+                    _ => null
+                };
+                string? actDescId = act.GetAttr("id");
+                uint? actEph = act.Tag == "ephemeral" && uint.TryParse(act.GetAttr("expiration"), NumberStyles.Integer, CultureInfo.InvariantCulture, out uint ev)
+                    ? ev
+                    : (act.Tag == "not_ephemeral" ? 0u : null);
+                bool? toggle = act.Tag switch
+                {
+                    "locked" or "announcement" or "no_frequently_forwarded" or "allow_admin_reports" or "group_history" => true,
+                    "unlocked" or "not_announcement" or "frequently_forwarded_ok" or "not_allow_admin_reports" or "no_group_history" => false,
+                    "membership_approval_mode" => string.Equals(act.GetChild("group_join")?.GetAttr("state"), "on", StringComparison.OrdinalIgnoreCase),
+                    _ => null
+                };
+                string? modeVal = act.Tag is "member_add_mode" or "member_link_mode" or "member_share_group_history_mode"
+                    ? (act.Content is NodeContent.StringContent msc ? msc.Text : null)
+                    : null;
+
+                var linkedGroups = new List<Jid>();
+                if (act.Tag is "link" or "unlink" or "created_sub_group_suggestion" or "revoked_sub_group_suggestions")
+                {
+                    foreach (Node lg in act.GetChildren("group").Concat(act.GetChildren("sub_group_suggestion")))
+                    {
+                        if (TryParseAttrJid(lg, "jid") is Jid gj)
+                        {
+                            linkedGroups.Add(gj);
+                        }
+                    }
                 }
+                string? linkKind = act.GetAttr("link_type") ?? act.GetAttr("unlink_type");
+                string? unlinkReason = act.GetAttr("unlink_reason");
+
+                if (act.Tag is "remove" or "modify")
+                {
+                    rotateSenderKey = true;
+                }
+
+                actions.Add(new ParsedGroupAction(
+                    act.Tag,
+                    pJids,
+                    pPns,
+                    actSubject,
+                    actDesc,
+                    actDescId,
+                    actEph,
+                    toggle,
+                    modeVal,
+                    act.GetAttr("prev_addressing_mode"),
+                    linkedGroups.Count > 0 ? linkedGroups : null,
+                    linkKind,
+                    unlinkReason));
             }
         }
 
         string? subject = actionNode?.GetAttr("subject");
-        bool rotateSenderKey = action is "remove" or "modify";
 
         return new ParsedGroupNotification(
             from,
@@ -575,10 +658,12 @@ public static class NotificationStanzas
             Array.Empty<Jid>(),
             action,
             actor,
-            participantJids,
-            participantPns,
+            allParticipantJids,
+            allParticipantPns,
             subject,
-            rotateSenderKey);
+            rotateSenderKey,
+            actions,
+            addressingMode);
     }
 
     public static ParsedMexNotification? ParseMexNotification(Node notification, TimeProvider? time = null)
@@ -604,6 +689,33 @@ public static class NotificationStanzas
             _ => "{}"
         };
         return new ParsedMexNotification(from, notification.GetAttr("id"), op, payload, ts);
+    }
+
+    public static IReadOnlyList<PrivacySettingEntry> ParsePrivacyNotification(Node notification)
+    {
+        ArgumentNullException.ThrowIfNull(notification);
+        Node? privacyNode = notification.GetChild("privacy");
+        if (privacyNode is null)
+        {
+            return Array.Empty<PrivacySettingEntry>();
+        }
+
+        var entries = new List<PrivacySettingEntry>();
+        foreach (Node cat in privacyNode.GetChildren("category"))
+        {
+            string? name = cat.GetAttr("name");
+            string? val = cat.GetAttr("value");
+            if (!string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(val))
+            {
+                entries.Add(new PrivacySettingEntry(
+                    PrivacyProtocol.ParseCategory(name),
+                    name,
+                    PrivacyProtocol.ParseValue(val),
+                    val,
+                    cat.GetAttr("dhash")));
+            }
+        }
+        return entries;
     }
 
     public static string? ParseStatusAboutText(Node notification)

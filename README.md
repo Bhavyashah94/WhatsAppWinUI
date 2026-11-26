@@ -19,16 +19,19 @@ src/WhatsApp.Api                 -> NoiseHandshakeRunner, NoiseSessionSocket, Iq
                                     OfflineBatchCoordinator, PreKeyUploader, PreKeyFetchClient,
                                     MessageSender, MessageReceiver, RetryCoordinator, PresenceClient,
                                     MediaTransferClient, HistorySyncCoordinator, PdoHistoryClient,
+                                    MexClient, GroupClient, GroupHistoryCoordinator, CommunityClient, StatusClient,
+                                    PrivacyClient, ProfileClient, AppStateSettingsClient, ChatActionsClient, ContactClient, AccountSafetyClient,
+                                    MediaReuploadCoordinator, CommentClient, BroadcastClient,
                                     SyncdCoordinator, UsyncClient, ProfilePictureClient, NotificationRouter, WhatsAppApiClient
         ├──▶ src/WhatsApp.Transport       -> WhatsAppEndpointBuilder, WebSocketTransport (System.IO.Pipelines + Happy Eyeballs)
         ├──▶ src/WhatsApp.Storage.Sqlite  -> Normalized WAL SQLite backend implementing IWhatsAppBackend (unified Web + Rust schemas)
         │
         ▼
 src/WhatsApp.Protocol            -> Pure Sans-I/O protocol core (zero socket or SQLite I/O):
-                                    Binary codec/JID/Stanza builders (Pairing, Messaging/Rich, Presence/ChatState, USync, Avatars, Notifications, ABProps/TcToken/MediaConn),
+                                    Binary codec/JID/Stanza builders (Pairing, Messaging/Rich, Presence/ChatState, Groups w:g2/MEX, Statuses, USync, Avatars, Notifications, ABProps/TcToken/MediaConn),
                                     Noise XX/IK/XXfallback, XEdDSA/Curve25519, PairingCrypto/PairCodeCrypto/ContactHash,
                                     MessageFraming/ReportingToken/AddonEncryption/MediaRetryCrypto,
-                                    Signal Double Ratchet & SenderKey, MediaCipher (upload/sidecar/CDN URLs), HistorySync/LidPnCache,
+                                    Signal Double Ratchet & SenderKey, MediaCipher (upload/sidecar/CDN URLs), HistorySync/GroupHistory/LidPnCache,
                                     AppState (syncd + 128B LTHash), Abstractions
         │
         ▼
@@ -49,8 +52,8 @@ src/WhatsApp.WaProto             -> Self-contained Grpc.Tools protoc codegen fro
 | **Phase 5** | AppState (`syncd`) + 128B HKDF-SHA256 `LtHash` engine (`AppStateKeys`, `AppStateHasher`, `AppStateMutationCodec`, `AppStatePatchParser`, `AppStateProcessor`, `SyncdCoordinator`) | Complete |
 | **Phase 6** | Live Web `.pb` sync, Pair-by-Phone-Code (`PairCodeCrypto`), `AppStateSyncKeyShare`/dirty-bit glue, `media_conn`/`abprops`/`tctoken`, `<notification>` router, `@username`/`usync`, avatars | Complete |
 | **Phase 7** | 1:1/group E2EE messaging, retry/PDO backfill, rich messages (reactions/edits/revokes/polls/events/pins/drafts/presence), MMS upload/download, `HistorySync` | Complete |
-| **Phase 8** | Full Groups + Group History Sharing, Communities (`CAG` & subgroups), Statuses/Stories (`status@broadcast` & `GroupStatusV2`) | Next |
-| **Phase 9** | Channels/Newsletters (`w:mex` & plaintext media), Business profiles/Catalogs/Labels/Quick Replies/Blocking, Meta AI/Bots | Planned |
+| **Phase 8** | **8A** Groups (`w:g2`/`w:mex`) + Group History Sharing; **8B** Communities (`CAG` & subgroups); **8C** Statuses/Stories (`status@broadcast`, `GroupStatusV2`, music/Q&A/sticker/privacy/mute); **8D** Account/Privacy/Profile/Contacts/ChatActions/Safety; **8E** Reupload Recovery, Comments, Broadcasts, FTS5 & PQ/CoexV2 Hardening | Complete |
+| **Phase 9** | Channels/Newsletters (`w:mex` & plaintext media), Business profiles/Catalogs/Labels/Quick Replies/Blocking, Meta AI/Bots | Next |
 | **Phase 10** | VoIP & WebRTC Calling (`<call>` signaling, ICE/TURN/DTLS-SRTP media loop, group calls, call logs) | Planned |
 | **Phase 11** | End-to-end headless CLI live verification harness (`apps/WhatsApp.Cli`) | Planned |
 | **Phase 12** | Native Windows 11 WinUI 3 Desktop Client (`apps/WhatsApp.Desktop`) | Planned |

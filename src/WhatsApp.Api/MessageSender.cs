@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Google.Protobuf;
 using Whatsapp;
 using WhatsApp.Protocol.Abstractions;
@@ -22,6 +23,8 @@ public sealed record SendMessageResult(
 /// </summary>
 public sealed class MessageSender
 {
+    public static readonly TimeSpan DefaultAckTimeout = TimeSpan.FromSeconds(30);
+
     private readonly NoiseSessionSocket _socket;
     private readonly UsyncClient _usync;
     private readonly PreKeyFetchClient _preKeyFetcher;
@@ -30,6 +33,7 @@ public sealed class MessageSender
     private readonly DeviceCredentials _credentials;
     private readonly RetryCoordinator _retryCoordinator;
     private readonly TimeProvider _timeProvider;
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<(string? ErrorCode, string? ErrorText)>> _ackWaiters = new(StringComparer.Ordinal);
     private long _msgSeq;
 
     public MessageSender(
@@ -204,6 +208,7 @@ public sealed class MessageSender
         string? mediaType = MessageStanzas.ClassifyMediaType(msgToSend);
         bool hideDecryptFail = MessageStanzas.ShouldHideDecryptFail(msgToSend, editAttribute);
         Jid? peerRecipientPn = isSelfChat && toBare.IsLid() ? _credentials.Pn?.ToNonAd() : null;
+        IReadOnlyList<Node>? resolvedExtraNodes = AppendInferredMetaIfAbsent(msgToSend, extraNodes);
 
         Node stanza = MessageStanzas.BuildDmStanza(
             msgId,
@@ -217,7 +222,7 @@ public sealed class MessageSender
             editAttribute: editAttribute,
             peerRecipientPn: peerRecipientPn,
             category: category,
-            extraNodes: extraNodes);
+            extraNodes: resolvedExtraNodes);
 
         var allowedUsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { toBare.ToString(), ownBare.ToString() };
         _retryCoordinator.CacheSentMessage(new CachedSentMessage(
@@ -371,6 +376,7 @@ public sealed class MessageSender
         string stanzaType = MessageStanzas.ClassifyStanzaType(msgToSend);
         string? mediaType = MessageStanzas.ClassifyMediaType(msgToSend);
         bool hideDecryptFail = MessageStanzas.ShouldHideDecryptFail(msgToSend, editAttribute);
+        IReadOnlyList<Node>? resolvedExtraNodes = AppendInferredMetaIfAbsent(msgToSend, extraNodes);
 
         Node stanza = MessageStanzas.BuildGroupStanza(
             msgId,
@@ -385,7 +391,7 @@ public sealed class MessageSender
             reportingToken: reportingToken,
             editAttribute: editAttribute,
             addressingMode: addressingMode,
-            extraNodes: extraNodes);
+            extraNodes: resolvedExtraNodes);
 
         _retryCoordinator.CacheSentMessage(new CachedSentMessage(
             msgId,
@@ -631,6 +637,15 @@ public sealed class MessageSender
         string? editAttribute = null,
         CancellationToken ct = default)
     {
+        if (toJid.Server == Server.Broadcast)
+        {
+            if (message.ReactionMessage?.Key?.Participant is { Length: > 0 } authorStr && Jid.TryParse(authorStr, out Jid authorJid))
+            {
+                return SendDmAsync(authorJid.ToNonAd(), message, messageId, editAttribute: editAttribute, ct: ct);
+            }
+            throw new ArgumentException("status@broadcast sends require StatusClient (or ReactionMessage targeting an author).", nameof(toJid));
+        }
+
         if (toJid.IsGroup())
         {
             if (groupParticipants is null)
@@ -670,6 +685,256 @@ public sealed class MessageSender
             includeReportingToken: false,
             category: "peer",
             ct: ct).ConfigureAwait(false);
+    }
+
+    public bool TryResolveMessageAck(Node ackNode)
+    {
+        ArgumentNullException.ThrowIfNull(ackNode);
+        if (!string.Equals(ackNode.Tag, "ack", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string? id = ackNode.GetAttr("id");
+        if (string.IsNullOrEmpty(id) || !_ackWaiters.TryRemove(id, out var tcs))
+        {
+            return false;
+        }
+
+        return tcs.TrySetResult((ackNode.GetAttr("error"), ackNode.GetAttr("error_text") ?? ackNode.GetAttr("text")));
+    }
+
+    /// <summary>
+    /// Sends a pairwise-encrypted <c>&lt;message to="{groupJid}"&gt;</c> stanza ONLY to the specified
+    /// <paramref name="targetUsers"/> and own companion devices (no group <c>skmsg</c>), used for
+    /// selective Group History Bundle delivery.
+    /// </summary>
+    public async Task<SendDirectGroupResult> SendGroupDirectAsync(
+        Jid groupJid,
+        IReadOnlyList<Jid> targetUsers,
+        Message message,
+        string? messageId = null,
+        string? addressingMode = null,
+        bool awaitServerAck = true,
+        IReadOnlyList<Node>? extraNodes = null,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(targetUsers);
+        ArgumentNullException.ThrowIfNull(message);
+
+        Jid groupBare = groupJid.ToNonAd();
+        string msgId = string.IsNullOrWhiteSpace(messageId) ? NextMessageId() : messageId;
+
+        bool preferLid = string.Equals(addressingMode, "lid", StringComparison.OrdinalIgnoreCase)
+            || targetUsers.Any(p => p.IsLid());
+        Jid ownBare = preferLid && _credentials.Lid is Jid lid
+            ? lid.ToNonAd()
+            : (_credentials.Pn?.ToNonAd() ?? _credentials.Lid!.Value.ToNonAd());
+        ushort ownDeviceId = GetOwnDeviceId();
+        Jid ownFull = ownBare with { Device = ownDeviceId };
+        string ownFullStr = ownFull.ToString();
+
+        var uniqueUsers = new List<Jid>();
+        var seenUsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Jid u in targetUsers.Append(ownBare))
+        {
+            Jid bare = u.ToNonAd();
+            if (seenUsers.Add(bare.ToString()))
+            {
+                uniqueUsers.Add(bare);
+            }
+        }
+
+        IReadOnlyDictionary<string, ResolvedDeviceList> deviceLists =
+            await _usync.GetDeviceListsAsync(uniqueUsers, UsyncContext.Message, true, ct).ConfigureAwait(false);
+
+        var targetDevices = new List<Jid>();
+        foreach (Jid u in uniqueUsers)
+        {
+            if (deviceLists.TryGetValue(u.ToString(), out ResolvedDeviceList? list))
+            {
+                foreach (uint devId in list.DeviceIds)
+                {
+                    Jid d = u with { Device = (ushort)devId };
+                    if (!string.Equals(d.ToString(), ownFullStr, StringComparison.OrdinalIgnoreCase))
+                    {
+                        targetDevices.Add(d);
+                    }
+                }
+            }
+            else if (!string.Equals(u.ToString(), ownBare.ToString(), StringComparison.OrdinalIgnoreCase))
+            {
+                targetDevices.Add(u);
+            }
+        }
+
+        SessionEnsureResult ensured = await _preKeyFetcher.EnsureSessionsAsync(targetDevices, reason: null, ct).ConfigureAwait(false);
+        var rejectedSet = ensured.RejectedDevices
+            .Where(r => r.Code == 406)
+            .Select(r => r.DeviceJid.ToProtocolAddress())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        byte[] unpaddedBytes = message.ToByteArray();
+        byte[] paddedDm = MessageFraming.PadMessageV2(unpaddedBytes);
+        Message dsmMsg = MessageFraming.WrapDeviceSentMessage(message, groupBare.ToString());
+        byte[] paddedDsm = MessageFraming.EncodeAndPadMessage(dsmMsg);
+
+        var encryptedDevices = new List<(Jid DeviceJid, string EncType, byte[] Ciphertext)>(targetDevices.Count);
+        bool anyPkmsg = false;
+
+        foreach (Jid dev in targetDevices)
+        {
+            if (rejectedSet.Contains(dev.ToProtocolAddress()) || !ensured.Sessions.TryGetValue(dev, out SignalSession? session))
+            {
+                continue;
+            }
+
+            bool isOwnCompanion = string.Equals(dev.User, ownBare.User, StringComparison.OrdinalIgnoreCase);
+            byte[] plaintext = isOwnCompanion ? paddedDsm : paddedDm;
+            SignalEncryptedPayload enc = SignalCipher.Encrypt(session, plaintext, _credentials.IdentityKey, _credentials.RegistrationId);
+            await _backend.Signal.SaveSessionAsync(dev.ToProtocolAddress(), session, ct).ConfigureAwait(false);
+
+            if (enc.Type == SignalCiphertextType.PreKeyMessage)
+            {
+                anyPkmsg = true;
+            }
+            encryptedDevices.Add((dev, enc.WireType, enc.Bytes));
+        }
+
+        string stanzaType = MessageStanzas.ClassifyStanzaType(message);
+        string? mediaType = MessageStanzas.ClassifyMediaType(message);
+        bool hideDecryptFail = MessageStanzas.ShouldHideDecryptFail(message);
+        IReadOnlyList<Node>? resolvedExtra = AppendInferredMetaIfAbsent(message, extraNodes);
+        string? phash = targetDevices.Count > 0 ? MessageFraming.ComputeParticipantListHash(targetDevices) : null;
+
+        Node stanza = MessageStanzas.BuildGroupDirectStanza(
+            msgId,
+            groupBare,
+            stanzaType,
+            encryptedDevices,
+            mediaType,
+            hideDecryptFail,
+            phash,
+            deviceIdentityBytes: anyPkmsg ? _credentials.AccountIdentityBytes : null,
+            reportingToken: null,
+            addressingMode: addressingMode,
+            extraNodes: resolvedExtra);
+
+        _retryCoordinator.CacheSentMessage(new CachedSentMessage(
+            msgId,
+            groupBare,
+            stanzaType,
+            mediaType,
+            hideDecryptFail,
+            unpaddedBytes,
+            addressingMode,
+            seenUsers));
+
+        var (ackReceived, errCode, errText) = await SendWithOptionalAckWaitAsync(stanza, msgId, awaitServerAck, ct).ConfigureAwait(false);
+        return new SendDirectGroupResult(msgId, ackReceived, encryptedDevices.Count, targetDevices.Count, errCode, errText);
+    }
+
+    public async Task<SendDirectGroupResult> SendGroupWithAckAsync(
+        Jid groupJid,
+        Message message,
+        IReadOnlyList<Jid> participantUsers,
+        string? messageId = null,
+        string? addressingMode = null,
+        CancellationToken ct = default)
+    {
+        string msgId = string.IsNullOrWhiteSpace(messageId) ? NextMessageId() : messageId;
+        var ackTcs = new TaskCompletionSource<(string? ErrorCode, string? ErrorText)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_ackWaiters.TryAdd(msgId, ackTcs))
+        {
+            throw new InvalidOperationException($"Duplicate pending message ACK waiter for ID '{msgId}'.");
+        }
+
+        try
+        {
+            SendMessageResult sent = await SendGroupMessageAsync(
+                groupJid,
+                message,
+                participantUsers,
+                messageId: msgId,
+                addressingMode: addressingMode,
+                ct: ct).ConfigureAwait(false);
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(DefaultAckTimeout);
+            try
+            {
+                var (errCode, errText) = await ackTcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+                return new SendDirectGroupResult(sent.MessageId, AckReceived: true, sent.TargetDeviceCount, sent.TargetDeviceCount, errCode, errText);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                return new SendDirectGroupResult(sent.MessageId, AckReceived: false, sent.TargetDeviceCount, sent.TargetDeviceCount);
+            }
+        }
+        finally
+        {
+            _ackWaiters.TryRemove(msgId, out _);
+        }
+    }
+
+    private async Task<(bool AckReceived, string? ErrorCode, string? ErrorText)> SendWithOptionalAckWaitAsync(
+        Node stanza,
+        string msgId,
+        bool awaitServerAck,
+        CancellationToken ct)
+    {
+        if (!awaitServerAck)
+        {
+            await _socket.SendNodeAsync(stanza, ct).ConfigureAwait(false);
+            return (false, null, null);
+        }
+
+        var ackTcs = new TaskCompletionSource<(string? ErrorCode, string? ErrorText)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_ackWaiters.TryAdd(msgId, ackTcs))
+        {
+            throw new InvalidOperationException($"Duplicate pending message ACK waiter for ID '{msgId}'.");
+        }
+
+        try
+        {
+            await _socket.SendNodeAsync(stanza, ct).ConfigureAwait(false);
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(DefaultAckTimeout);
+            try
+            {
+                var (errCode, errText) = await ackTcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+                return (true, errCode, errText);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                return (false, null, null);
+            }
+        }
+        finally
+        {
+            _ackWaiters.TryRemove(msgId, out _);
+        }
+    }
+
+    private static IReadOnlyList<Node>? AppendInferredMetaIfAbsent(Message message, IReadOnlyList<Node>? extraNodes)
+    {
+        Node? inferred = MessageStanzas.InferMetaNode(message);
+        if (inferred is null)
+        {
+            return extraNodes;
+        }
+        if (extraNodes is null || extraNodes.Count == 0)
+        {
+            return [inferred];
+        }
+        if (extraNodes.Any(n => string.Equals(n.Tag, "meta", StringComparison.Ordinal)))
+        {
+            return extraNodes;
+        }
+        var combined = new List<Node>(extraNodes.Count + 1);
+        combined.AddRange(extraNodes);
+        combined.Add(inferred);
+        return combined;
     }
 
     private async Task PersistSentMetadataAsync(

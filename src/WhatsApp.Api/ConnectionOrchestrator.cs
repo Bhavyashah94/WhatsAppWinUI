@@ -61,6 +61,20 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
     private MediaTransferClient? _activeMediaTransfer;
     private HistorySyncCoordinator? _activeHistorySync;
     private PdoHistoryClient? _activePdoHistory;
+    private MexClient? _activeMexClient;
+    private GroupClient? _activeGroups;
+    private GroupHistoryCoordinator? _activeGroupHistory;
+    private CommunityClient? _activeCommunities;
+    private StatusClient? _activeStatus;
+    private PrivacyClient? _activePrivacy;
+    private ProfileClient? _activeProfile;
+    private AppStateSettingsClient? _activeAppStateSettings;
+    private ChatActionsClient? _activeChatActions;
+    private ContactClient? _activeContacts;
+    private AccountSafetyClient? _activeAccountSafety;
+    private MediaReuploadCoordinator? _activeMediaReupload;
+    private CommentClient? _activeComments;
+    private BroadcastClient? _activeBroadcasts;
     private long _generation;
     private int _disposed;
 
@@ -97,6 +111,20 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
     public MediaTransferClient? ActiveMediaTransfer => Volatile.Read(ref _activeMediaTransfer);
     public HistorySyncCoordinator? ActiveHistorySync => Volatile.Read(ref _activeHistorySync);
     public PdoHistoryClient? ActivePdoHistory => Volatile.Read(ref _activePdoHistory);
+    public MexClient? ActiveMexClient => Volatile.Read(ref _activeMexClient);
+    public GroupClient? ActiveGroups => Volatile.Read(ref _activeGroups);
+    public GroupHistoryCoordinator? ActiveGroupHistory => Volatile.Read(ref _activeGroupHistory);
+    public CommunityClient? ActiveCommunities => Volatile.Read(ref _activeCommunities);
+    public StatusClient? ActiveStatus => Volatile.Read(ref _activeStatus);
+    public PrivacyClient? ActivePrivacy => Volatile.Read(ref _activePrivacy);
+    public ProfileClient? ActiveProfile => Volatile.Read(ref _activeProfile);
+    public AppStateSettingsClient? ActiveAppStateSettings => Volatile.Read(ref _activeAppStateSettings);
+    public ChatActionsClient? ActiveChatActions => Volatile.Read(ref _activeChatActions);
+    public ContactClient? ActiveContacts => Volatile.Read(ref _activeContacts);
+    public AccountSafetyClient? ActiveAccountSafety => Volatile.Read(ref _activeAccountSafety);
+    public MediaReuploadCoordinator? ActiveMediaReupload => Volatile.Read(ref _activeMediaReupload);
+    public CommentClient? ActiveComments => Volatile.Read(ref _activeComments);
+    public BroadcastClient? ActiveBroadcasts => Volatile.Read(ref _activeBroadcasts);
 
     /// <summary>
     /// Starts the managed background connect-and-reconnect loop until stopped, logged out/replaced,
@@ -301,10 +329,24 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             var usync = new UsyncClient(iqClient, _backend, _lidPnCache, _options.TimeProvider);
             var preKeyFetcher = new PreKeyFetchClient(iqClient, _backend, _lidPnCache, credentials);
             var retryCoordinator = new RetryCoordinator(socket, _backend, preKeyFetcher, _lidPnCache, credentials, EmitEventAsync);
-            var messageReceiver = new MessageReceiver(socket, _backend, _lidPnCache, credentials, retryCoordinator, EmitEventAsync, _options.TimeProvider, historySync);
+            var messageReceiver = new MessageReceiver(socket, _backend, _lidPnCache, credentials, retryCoordinator, EmitEventAsync, _options.TimeProvider, historySync, mediaTransfer);
             var messageSender = new MessageSender(socket, usync, preKeyFetcher, _backend, _lidPnCache, credentials, retryCoordinator, _options.TimeProvider);
             var presenceClient = new PresenceClient(socket, _backend, credentials, EmitEventAsync);
             var pdoHistory = new PdoHistoryClient(_backend, messageSender, credentials);
+            var mexClient = new MexClient(iqClient);
+            var groupClient = new GroupClient(iqClient, mexClient, messageSender, _backend, _lidPnCache, emitEvent: EmitEventAsync, timeProvider: _options.TimeProvider);
+            var groupHistory = new GroupHistoryCoordinator(iqClient, messageSender, mediaTransfer, credentials, _options.TimeProvider);
+            var communities = new CommunityClient(iqClient, mexClient, groupClient, _backend, _lidPnCache);
+            var statusClient = new StatusClient(socket, usync, preKeyFetcher, messageSender, _backend, _lidPnCache, credentials, retryCoordinator, _options.TimeProvider);
+            var privacyClient = new PrivacyClient(iqClient);
+            var profileClient = new ProfileClient(socket, mexClient, _backend, credentials, syncd, _options.TimeProvider);
+            var accountSafetyClient = new AccountSafetyClient(iqClient, _backend, credentials, EmitEventAsync, _options.TimeProvider);
+            var mediaReupload = new MediaReuploadCoordinator(socket, _backend, _lidPnCache, credentials, EmitEventAsync);
+            var commentClient = new CommentClient(messageSender, _backend, credentials, _options.TimeProvider);
+            var broadcastClient = new BroadcastClient(iqClient, socket, usync, preKeyFetcher, messageSender, _backend, _lidPnCache, credentials, retryCoordinator);
+            AppStateSettingsClient? appStateSettingsClient = syncd is not null ? new AppStateSettingsClient(syncd, _options.TimeProvider) : null;
+            ChatActionsClient? chatActionsClient = syncd is not null ? new ChatActionsClient(syncd, messageSender, _options.TimeProvider) : null;
+            ContactClient? contactClient = syncd is not null ? new ContactClient(syncd, _lidPnCache, _options.TimeProvider) : null;
 
             Volatile.Write(ref _activeUsync, usync);
             Volatile.Write(ref _activeProfilePictures, new ProfilePictureClient(iqClient, _backend, _options.HttpClient));
@@ -316,6 +358,20 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             Volatile.Write(ref _activeMediaTransfer, mediaTransfer);
             Volatile.Write(ref _activeHistorySync, historySync);
             Volatile.Write(ref _activePdoHistory, pdoHistory);
+            Volatile.Write(ref _activeMexClient, mexClient);
+            Volatile.Write(ref _activeGroups, groupClient);
+            Volatile.Write(ref _activeGroupHistory, groupHistory);
+            Volatile.Write(ref _activeCommunities, communities);
+            Volatile.Write(ref _activeStatus, statusClient);
+            Volatile.Write(ref _activePrivacy, privacyClient);
+            Volatile.Write(ref _activeProfile, profileClient);
+            Volatile.Write(ref _activeAppStateSettings, appStateSettingsClient);
+            Volatile.Write(ref _activeChatActions, chatActionsClient);
+            Volatile.Write(ref _activeContacts, contactClient);
+            Volatile.Write(ref _activeAccountSafety, accountSafetyClient);
+            Volatile.Write(ref _activeMediaReupload, mediaReupload);
+            Volatile.Write(ref _activeComments, commentClient);
+            Volatile.Write(ref _activeBroadcasts, broadcastClient);
             notifications = new NotificationRouter(
                 _backend,
                 _lidPnCache,
@@ -325,7 +381,9 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
                 syncd,
                 EmitEventAsync,
                 _options.TimeProvider,
-                messageReceiver);
+                messageReceiver,
+                groupClient,
+                mediaReupload);
             Volatile.Write(ref _activeNotifications, notifications);
 
             KeepaliveOptions keepaliveOpts = _options.KeepaliveOptions ?? new KeepaliveOptions
@@ -539,7 +597,20 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
                     }
                 },
 
-                OnAck = (node, token) => DispatchTrafficNodeAsync(node, token, watchdog, offlineBatch, _options.ExternalHandlers?.OnAck),
+                OnAck = (node, token) => DispatchTrafficNodeAsync(
+                    node,
+                    token,
+                    watchdog,
+                    offlineBatch,
+                    async (n, t) =>
+                    {
+                        messageSender.TryResolveMessageAck(n);
+                        mediaReupload.NotifyReceiptAck(n);
+                        if (_options.ExternalHandlers?.OnAck is { } extAck)
+                        {
+                            await extAck(n, t).ConfigureAwait(false);
+                        }
+                    }),
                 OnReceipt = (node, token) => DispatchTrafficNodeAsync(
                     node,
                     token,
@@ -660,6 +731,20 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             Volatile.Write(ref _activeMediaTransfer, null);
             Volatile.Write(ref _activeHistorySync, null);
             Volatile.Write(ref _activePdoHistory, null);
+            Volatile.Write(ref _activeMexClient, null);
+            Volatile.Write(ref _activeGroups, null);
+            Volatile.Write(ref _activeGroupHistory, null);
+            Volatile.Write(ref _activeCommunities, null);
+            Volatile.Write(ref _activeStatus, null);
+            Volatile.Write(ref _activePrivacy, null);
+            Volatile.Write(ref _activeProfile, null);
+            Volatile.Write(ref _activeAppStateSettings, null);
+            Volatile.Write(ref _activeChatActions, null);
+            Volatile.Write(ref _activeContacts, null);
+            Volatile.Write(ref _activeAccountSafety, null);
+            Volatile.Write(ref _activeMediaReupload, null);
+            Volatile.Write(ref _activeComments, null);
+            Volatile.Write(ref _activeBroadcasts, null);
             sessionStopCts.Cancel();
 
             if (watchdog is not null) await watchdog.DisposeAsync().ConfigureAwait(false);

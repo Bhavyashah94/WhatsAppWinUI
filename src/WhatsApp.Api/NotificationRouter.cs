@@ -21,6 +21,8 @@ public sealed class NotificationRouter
     private readonly IqClient _iqClient;
     private readonly SyncdCoordinator? _syncd;
     private readonly MessageReceiver? _messageReceiver;
+    private readonly GroupClient? _groupClient;
+    private readonly MediaReuploadCoordinator? _mediaReupload;
     private readonly Func<WhatsAppEvent, ValueTask> _emitEvent;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _preKeyUploadGate = new(1, 1);
@@ -34,7 +36,9 @@ public sealed class NotificationRouter
         SyncdCoordinator? syncd,
         Func<WhatsAppEvent, ValueTask> emitEvent,
         TimeProvider? timeProvider = null,
-        MessageReceiver? messageReceiver = null)
+        MessageReceiver? messageReceiver = null,
+        GroupClient? groupClient = null,
+        MediaReuploadCoordinator? mediaReupload = null)
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _lidPnCache = lidPnCache ?? throw new ArgumentNullException(nameof(lidPnCache));
@@ -43,6 +47,8 @@ public sealed class NotificationRouter
         _iqClient = iqClient ?? throw new ArgumentNullException(nameof(iqClient));
         _syncd = syncd;
         _messageReceiver = messageReceiver;
+        _groupClient = groupClient;
+        _mediaReupload = mediaReupload;
         _emitEvent = emitEvent ?? throw new ArgumentNullException(nameof(emitEvent));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -96,8 +102,19 @@ public sealed class NotificationRouter
             case "mex":
                 await HandleMexAsync(notification).ConfigureAwait(false);
                 break;
-            case "mediaretry" when _messageReceiver is not null:
-                await _messageReceiver.HandleMediaRetryNotificationAsync(notification, mediaKey32: null, handlerToken).ConfigureAwait(false);
+            case "privacy":
+                await HandlePrivacyAsync(notification, ts).ConfigureAwait(false);
+                break;
+            case "mediaretry":
+                if (_mediaReupload is not null
+                    && await _mediaReupload.NotifyMediaRetryAsync(notification, handlerToken).ConfigureAwait(false))
+                {
+                    break;
+                }
+                if (_messageReceiver is not null)
+                {
+                    await _messageReceiver.HandleMediaRetryNotificationAsync(notification, mediaKey32: null, handlerToken).ConfigureAwait(false);
+                }
                 break;
         }
 
@@ -390,6 +407,28 @@ public sealed class NotificationRouter
             return;
         }
 
+        if (_groupClient is not null)
+        {
+            await _groupClient.ApplyGroupNotificationAsync(parsed, ct).ConfigureAwait(false);
+        }
+
+        if (parsed.Actions is not null)
+        {
+            foreach (ParsedGroupAction act in parsed.Actions)
+            {
+                if (act.Action is "link" or "unlink" && act.LinkedGroupJids is { Count: > 0 } linked)
+                {
+                    await _emitEvent(new CommunityLinkChangedEvent(
+                        parsed.From.ToNonAdString(),
+                        act.Action,
+                        act.LinkKind,
+                        act.UnlinkReason,
+                        linked.Select(j => j.ToNonAdString()).ToArray(),
+                        parsed.TimestampSeconds)).ConfigureAwait(false);
+                }
+            }
+        }
+
         if (parsed.IsDirtyNotification)
         {
             foreach (Jid dirtyGroup in parsed.DirtyGroupJids)
@@ -581,6 +620,15 @@ public sealed class NotificationRouter
         }
 
         await _emitEvent(new MexNotificationEvent(parsed.Operation, parsed.RawPayloadJson, parsed.TimestampSeconds)).ConfigureAwait(false);
+    }
+
+    private async Task HandlePrivacyAsync(Node notification, long ts)
+    {
+        IReadOnlyList<PrivacySettingEntry> categories = NotificationStanzas.ParsePrivacyNotification(notification);
+        if (categories.Count > 0)
+        {
+            await _emitEvent(new PrivacyUpdatedEvent(categories, ts)).ConfigureAwait(false);
+        }
     }
 
     private async Task RotateOwnSenderKeyAsync(string groupJid, CancellationToken ct)

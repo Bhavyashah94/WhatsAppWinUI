@@ -246,4 +246,35 @@ public static class AddonEncryption
         byte[] pt = DecryptAddon(encPayload, iv12, parentSecret32, targetMessageId, targetSenderJid, modifierJid, type);
         return Message.Parser.ParseFrom(pt);
     }
+
+    public static (byte[] EncPayload, byte[] Iv12) EncryptComment(
+        Message innerMessage,
+        ReadOnlySpan<byte> messageSecret32,
+        string parentMessageId,
+        string parentOriginalSenderJid,
+        string commenterJid,
+        ReadOnlySpan<byte> ivOverride = default)
+    {
+        ArgumentNullException.ThrowIfNull(innerMessage);
+        return EncryptAddon(
+            innerMessage.ToByteArray(),
+            messageSecret32,
+            parentMessageId,
+            parentOriginalSenderJid,
+            commenterJid,
+            AddonModificationType.EncComment,
+            ivOverride);
+    }
+
+    public static Message DecryptComment(
+        ReadOnlySpan<byte> encPayload,
+        ReadOnlySpan<byte> iv12,
+        ReadOnlySpan<byte> messageSecret32,
+        string parentMessageId,
+        string parentOriginalSenderJid,
+        string commenterJid)
+    {
+        byte[] pt = DecryptAddon(encPayload, iv12, messageSecret32, parentMessageId, parentOriginalSenderJid, commenterJid, AddonModificationType.EncComment);
+        return Message.Parser.ParseFrom(pt);
+    }
 }

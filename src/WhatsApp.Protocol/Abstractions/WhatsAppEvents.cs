@@ -141,3 +141,99 @@ public sealed record MessageAddOnEvent(
     string? PayloadText,
     bool? BoolFlag,
     long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record GroupHistoryBundleReceivedEvent(
+    string GroupJid,
+    string SenderJid,
+    string MessageId,
+    int MessageCount,
+    long OldestMessageTimestampInBundle,
+    IReadOnlyList<string> HistoryReceivers,
+    IReadOnlyList<MessageRecord> Messages,
+    long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record MemberLabelUpdatedEvent(
+    string GroupJid,
+    string ParticipantJid,
+    string Label,
+    long LabelTimestampSeconds,
+    long NotificationTimestampSeconds) : WhatsAppEvent;
+
+public sealed record GroupMetadataUpdatedEvent(
+    string GroupJid,
+    string Reason,
+    int ParticipantCount) : WhatsAppEvent;
+
+public sealed record CommunityLinkChangedEvent(
+    string CommunityJid,
+    string Action,
+    string? LinkKind,
+    string? UnlinkReason,
+    IReadOnlyList<string> SubgroupJids,
+    long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record StatusPrivacyUpdatedEvent(
+    int? Mode,
+    IReadOnlyList<string> UserJids,
+    bool ShareToFb,
+    bool ShareToIg) : WhatsAppEvent;
+
+public sealed record UserStatusMuteUpdatedEvent(
+    string UserJid,
+    bool Muted) : WhatsAppEvent;
+
+public sealed record GroupStatusReceivedEvent(
+    string GroupJid,
+    string SenderJid,
+    string MessageId,
+    MessageRecord Record,
+    long TimestampSeconds) : WhatsAppEvent;
+
+// Phase 8D: Privacy, Profile, AppState Settings, ChatActions, Contacts, Stickers & Safety Events
+public sealed record PrivacyUpdatedEvent(IReadOnlyList<WhatsApp.Protocol.Binary.Stanzas.PrivacySettingEntry> Categories, long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record LinkPreviewsDisabledUpdatedEvent(bool PreviewsDisabled, long TimestampMs) : WhatsAppEvent;
+
+public sealed record UnarchiveChatsSettingUpdatedEvent(bool UnarchiveChats, long TimestampMs) : WhatsAppEvent;
+
+public sealed record ChannelsPersonalisedRecUpdatedEvent(bool IsUserOptedOut, long TimestampMs) : WhatsAppEvent;
+
+public sealed record PinUpdatedEvent(string ChatJid, bool Pinned, long TimestampMs) : WhatsAppEvent;
+
+public sealed record MuteUpdatedEvent(string ChatJid, bool Muted, long? MuteEndTimestampMs, long TimestampMs) : WhatsAppEvent;
+
+public sealed record ArchiveUpdatedEvent(string ChatJid, bool Archived, long TimestampMs) : WhatsAppEvent;
+
+public sealed record MarkChatAsReadUpdatedEvent(string ChatJid, bool Read, long TimestampMs) : WhatsAppEvent;
+
+public sealed record LockChatUpdatedEvent(string ChatJid, bool Locked, long TimestampMs) : WhatsAppEvent;
+
+public sealed record StarUpdatedEvent(string ChatJid, string MessageId, bool FromMe, bool Starred, long TimestampMs) : WhatsAppEvent;
+
+public sealed record DeleteMessageForMeUpdatedEvent(string ChatJid, string MessageId, bool FromMe, bool DeleteMedia, long TimestampMs) : WhatsAppEvent;
+
+public sealed record ClearChatUpdatedEvent(string ChatJid, bool DeleteStarred, bool DeleteMedia, long TimestampMs) : WhatsAppEvent;
+
+public sealed record DeleteChatUpdatedEvent(string ChatJid, bool DeleteMedia, long TimestampMs) : WhatsAppEvent;
+
+public sealed record FavoritesUpdatedEvent(IReadOnlyList<string> FavoriteIds, long TimestampMs) : WhatsAppEvent;
+
+public sealed record ContactUpdatedEvent(string ContactJid, bool IsLid, string? FullName, string? FirstName, string? Username, long TimestampMs) : WhatsAppEvent;
+
+public sealed record ContactRemovedEvent(string ContactJid, long TimestampMs) : WhatsAppEvent;
+
+public sealed record FavoriteStickerUpdatedEvent(string FileHash, bool IsFavorite, string? DirectPath, string? Mimetype, long TimestampMs) : WhatsAppEvent;
+
+public sealed record RemoveRecentStickerUpdatedEvent(string FileHash, long? LastStickerSentTs, long TimestampMs) : WhatsAppEvent;
+
+public sealed record SignedPreKeyRotatedEvent(uint PreviousSignedPreKeyId, uint NewSignedPreKeyId, long TimestampSeconds) : WhatsAppEvent;
+
+public sealed record DraftUpdatedEvent(string ChatJid, string? DraftText, long TimestampMs, bool Cleared) : WhatsAppEvent;
+
+public sealed record CommentReceivedEvent(
+    string ChatJid,
+    string ParentMessageId,
+    string SenderJid,
+    string CommentMessageId,
+    MessageRecord Record,
+    long TimestampSeconds) : WhatsAppEvent;

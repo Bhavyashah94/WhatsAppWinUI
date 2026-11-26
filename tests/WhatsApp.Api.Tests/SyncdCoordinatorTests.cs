@@ -150,9 +150,11 @@ public sealed class SyncdCoordinatorTests
         var updatedCreds = await backend.Device.LoadAsync();
         Assert.AreEqual("Bhavya", updatedCreds?.PushName);
 
-        Assert.AreEqual(2, events.Count);
-        Assert.AreEqual(new AppStateUpdatedEvent(AppStateCollections.Regular, 1, 1), events[0]);
-        Assert.AreEqual(new AppStateUpdatedEvent(AppStateCollections.Regular, 2, 1), events[1]);
+        var appStateEvents = events.OfType<AppStateUpdatedEvent>().ToArray();
+        Assert.AreEqual(2, appStateEvents.Length);
+        Assert.AreEqual(new AppStateUpdatedEvent(AppStateCollections.Regular, 1, 1), appStateEvents[0]);
+        Assert.AreEqual(new AppStateUpdatedEvent(AppStateCollections.Regular, 2, 1), appStateEvents[1]);
+        Assert.IsTrue(events.OfType<MuteUpdatedEvent>().Any(m => m.ChatJid == "555@s.whatsapp.net" && m.Muted));
     }
 
     [TestMethod]

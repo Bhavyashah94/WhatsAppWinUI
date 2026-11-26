@@ -25,6 +25,7 @@ public sealed class MessageReceiver
     private readonly DeviceCredentials _credentials;
     private readonly RetryCoordinator _retryCoordinator;
     private readonly HistorySyncCoordinator? _historySync;
+    private readonly MediaTransferClient? _mediaTransfer;
     private readonly Func<WhatsAppEvent, ValueTask> _emitEvent;
     private readonly TimeProvider _timeProvider;
 
@@ -36,7 +37,8 @@ public sealed class MessageReceiver
         RetryCoordinator retryCoordinator,
         Func<WhatsAppEvent, ValueTask> emitEvent,
         TimeProvider? timeProvider = null,
-        HistorySyncCoordinator? historySync = null)
+        HistorySyncCoordinator? historySync = null,
+        MediaTransferClient? mediaTransfer = null)
     {
         _socket = socket ?? throw new ArgumentNullException(nameof(socket));
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
@@ -44,6 +46,7 @@ public sealed class MessageReceiver
         _credentials = credentials ?? throw new ArgumentNullException(nameof(credentials));
         _retryCoordinator = retryCoordinator ?? throw new ArgumentNullException(nameof(retryCoordinator));
         _historySync = historySync;
+        _mediaTransfer = mediaTransfer;
         _emitEvent = emitEvent ?? throw new ArgumentNullException(nameof(emitEvent));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -376,6 +379,10 @@ public sealed class MessageReceiver
         {
             MessageRecord record = ToMessageRecord(parsed.Id, chatBare, senderBare, fromMe, (ulong)parsed.TimestampSeconds, message);
             await _backend.History.SaveMessageAsync(record, ct).ConfigureAwait(false);
+            if (message.GroupStatusMessageV2 is not null)
+            {
+                await _emitEvent(new GroupStatusReceivedEvent(chatBare, senderBare, parsed.Id, record, parsed.TimestampSeconds)).ConfigureAwait(false);
+            }
             await _emitEvent(new MessageReceivedEvent(record)).ConfigureAwait(false);
         }
     }
@@ -391,13 +398,42 @@ public sealed class MessageReceiver
 
         if (m.ReactionMessage is { } rx)
         {
+            string emoji = rx.HasText ? rx.Text : string.Empty;
+            string targetId = rx.Key?.Id ?? string.Empty;
+            if (!string.IsNullOrEmpty(targetId))
+            {
+                await _backend.History.UpsertMessageReactionAsync(chatBare, targetId, senderBare, emoji, ct).ConfigureAwait(false);
+            }
             await _emitEvent(new MessageAddOnEvent(
                 "reaction",
                 chatBare,
                 senderBare,
-                rx.Key?.Id ?? string.Empty,
-                rx.HasText ? rx.Text : string.Empty,
-                BoolFlag: rx.HasText && rx.Text.Length > 0,
+                targetId,
+                emoji,
+                BoolFlag: emoji.Length > 0,
+                parsed.TimestampSeconds)).ConfigureAwait(false);
+        }
+
+        if (m.EncCommentMessage is { TargetMessageKey: { Id.Length: > 0 } cmtKey, EncPayload.Length: > 0, EncIv.Length: 12 } encCmt
+            && await TryDecryptAddonWithFallbackAsync(
+                cmtKey,
+                chatBare,
+                senderBare,
+                (sec, parentCand, modCand) => AddonEncryption.DecryptComment(
+                    encCmt.EncPayload.Span, encCmt.EncIv.Span, sec, cmtKey.Id, parentCand, modCand),
+                ct).ConfigureAwait(false) is { Result: { } decryptedComment })
+        {
+            MessageRecord cmtRecord = ToMessageRecord(parsed.Id, chatBare, senderBare, IsOwnUser(parsed.SenderDeviceJid.User), (ulong)parsed.TimestampSeconds, decryptedComment)
+                with { QuotedMessageId = cmtKey.Id, QuotedSenderJid = cmtKey.HasParticipant ? cmtKey.Participant : null };
+            await _backend.History.SaveMessageAsync(cmtRecord, ct).ConfigureAwait(false);
+            await _emitEvent(new CommentReceivedEvent(chatBare, cmtKey.Id, senderBare, parsed.Id, cmtRecord, parsed.TimestampSeconds)).ConfigureAwait(false);
+            await _emitEvent(new MessageAddOnEvent(
+                "enc_comment",
+                chatBare,
+                senderBare,
+                cmtKey.Id,
+                cmtRecord.Text,
+                BoolFlag: null,
                 parsed.TimestampSeconds)).ConfigureAwait(false);
         }
 
@@ -496,6 +532,11 @@ public sealed class MessageReceiver
                     ? (edited.HasConversation ? edited.Conversation : edited.ExtendedTextMessage?.Text)
                     : innerMsg.PollAddOptionMessage?.AddOption?.OptionName;
 
+                if (modType == AddonModificationType.MessageEdit)
+                {
+                    await _backend.History.ApplyMessageEditAsync(chatBare, secKey.Id, summaryText, parsed.TimestampSeconds, ct).ConfigureAwait(false);
+                }
+
                 await _emitEvent(new MessageAddOnEvent(
                     kind,
                     chatBare,
@@ -537,6 +578,7 @@ public sealed class MessageReceiver
         {
             if (pm.Type == Message.Types.ProtocolMessage.Types.Type.Revoke && pm.Key is { Id.Length: > 0 } revKey)
             {
+                await _backend.History.MarkMessageRevokedAsync(chatBare, revKey.Id, ct).ConfigureAwait(false);
                 await _emitEvent(new MessageAddOnEvent(
                     "revoke",
                     chatBare,
@@ -549,6 +591,7 @@ public sealed class MessageReceiver
             else if (pm.Type == Message.Types.ProtocolMessage.Types.Type.MessageEdit && pm.Key is { Id.Length: > 0 } editKey && pm.EditedMessage is { } ed)
             {
                 string? editedText = ed.HasConversation ? ed.Conversation : (ed.ExtendedTextMessage is { HasText: true } ext ? ext.Text : null);
+                await _backend.History.ApplyMessageEditAsync(chatBare, editKey.Id, editedText, parsed.TimestampSeconds, ct).ConfigureAwait(false);
                 await _emitEvent(new MessageAddOnEvent(
                     "message_edit",
                     chatBare,
@@ -564,16 +607,103 @@ public sealed class MessageReceiver
             }
             else if (pm.Type == Message.Types.ProtocolMessage.Types.Type.DraftMessageSync && pm.DraftMessageSync is { } dms)
             {
-                string? draftText = dms.Draft is { HasConversation: true } ? dms.Draft.Conversation : null;
+                string targetChat = dms.HasChatJid && !string.IsNullOrEmpty(dms.ChatJid) ? dms.ChatJid : chatBare;
+                bool isSet = dms.Action == DraftMessageSync.Types.Action.Set;
+                string? draftText = isSet && dms.Draft is { HasConversation: true } ? dms.Draft.Conversation : null;
+                long draftTsMs = dms.HasEditTimestampMs ? dms.EditTimestampMs : (pm.HasTimestampMs ? pm.TimestampMs : parsed.TimestampSeconds * 1000L);
+                await _backend.History.SaveDraftAsync(targetChat, draftText, draftTsMs, ct).ConfigureAwait(false);
+                await _emitEvent(new DraftUpdatedEvent(targetChat, draftText, draftTsMs, Cleared: !isSet)).ConfigureAwait(false);
                 await _emitEvent(new MessageAddOnEvent(
                     "draft_sync",
-                    dms.HasChatJid ? dms.ChatJid : chatBare,
+                    targetChat,
                     senderBare,
                     parsed.Id,
                     draftText,
-                    BoolFlag: dms.Action == DraftMessageSync.Types.Action.Set,
+                    BoolFlag: isSet,
                     parsed.TimestampSeconds)).ConfigureAwait(false);
             }
+            else if (pm.Type == Message.Types.ProtocolMessage.Types.Type.GroupMemberLabelChange && pm.MemberLabel is { } ml)
+            {
+                await _emitEvent(new MemberLabelUpdatedEvent(
+                    chatBare,
+                    senderBare,
+                    ml.HasLabel ? ml.Label : string.Empty,
+                    ml.HasLabelTimestamp ? ml.LabelTimestamp : parsed.TimestampSeconds,
+                    parsed.TimestampSeconds)).ConfigureAwait(false);
+            }
+        }
+
+        if (m.StatusQuestionAnswerMessage is { Key: { Id.Length: > 0 } qaKey } qa)
+        {
+            await _emitEvent(new MessageAddOnEvent(
+                "status_question_answer",
+                qaKey.HasRemoteJid ? qaKey.RemoteJid : chatBare,
+                senderBare,
+                qaKey.Id,
+                qa.HasText ? qa.Text : string.Empty,
+                BoolFlag: null,
+                parsed.TimestampSeconds)).ConfigureAwait(false);
+        }
+
+        if (m.StatusStickerInteractionMessage is { Key: { Id.Length: > 0 } stkKey } ssi)
+        {
+            await _emitEvent(new MessageAddOnEvent(
+                "status_sticker_interaction",
+                stkKey.HasRemoteJid ? stkKey.RemoteJid : chatBare,
+                senderBare,
+                stkKey.Id,
+                ssi.HasStickerKey ? ssi.StickerKey : ssi.Type.ToString(),
+                BoolFlag: null,
+                parsed.TimestampSeconds)).ConfigureAwait(false);
+        }
+
+        if (m.MessageHistoryBundle is { } bundle && bundle.MessageHistoryMetadata is { } histMeta)
+        {
+            IReadOnlyList<MessageRecord> decodedRecords = Array.Empty<MessageRecord>();
+            if (_mediaTransfer is not null
+                && bundle.HasDirectPath
+                && bundle.MediaKey is { Length: 32 } mk
+                && !GroupHistoryCodec.IsBundleExpired(histMeta, _timeProvider.GetUtcNow().ToUnixTimeSeconds()))
+            {
+                byte[]? encSha = bundle.FileEncSha256 is { Length: > 0 } fe ? fe.ToByteArray() : null;
+                byte[]? plainSha = bundle.FileSha256 is { Length: > 0 } fp ? fp.ToByteArray() : null;
+                byte[] compressed = await _mediaTransfer.DownloadAsync(
+                    bundle.DirectPath,
+                    WaMediaType.GroupHistory,
+                    mk.ToByteArray(),
+                    plainSha ?? ReadOnlyMemory<byte>.Empty,
+                    encSha ?? ReadOnlyMemory<byte>.Empty,
+                    ct).ConfigureAwait(false);
+
+                GroupHistory gh = GroupHistoryCodec.DecompressGroupHistory(compressed);
+                var records = new List<MessageRecord>(gh.Messages.Count);
+                foreach (WebMessageInfo item in gh.Messages)
+                {
+                    if (item.Key is { Id.Length: > 0 } k && item.Message is { } itemMsg)
+                    {
+                        MessageRecord rec = ToMessageRecord(
+                            k.Id,
+                            k.HasRemoteJid ? k.RemoteJid : chatBare,
+                            item.HasParticipant ? item.Participant : (k.HasParticipant ? k.Participant : null),
+                            k.FromMe,
+                            item.HasMessageTimestamp ? item.MessageTimestamp : (ulong)parsed.TimestampSeconds,
+                            itemMsg);
+                        await _backend.History.SaveMessageAsync(rec, ct).ConfigureAwait(false);
+                        records.Add(rec);
+                    }
+                }
+                decodedRecords = records;
+            }
+
+            await _emitEvent(new GroupHistoryBundleReceivedEvent(
+                chatBare,
+                senderBare,
+                parsed.Id,
+                (int)(histMeta.HasMessageCount ? histMeta.MessageCount : decodedRecords.Count),
+                histMeta.HasOldestMessageTimestampInBundle ? histMeta.OldestMessageTimestampInBundle : 0,
+                histMeta.HistoryReceivers.ToArray(),
+                decodedRecords,
+                parsed.TimestampSeconds)).ConfigureAwait(false);
         }
     }
 
@@ -801,39 +931,64 @@ public sealed class MessageReceiver
         Message message)
     {
         Message m = MessageStanzas.UnwrapClassificationMessage(message);
+        ContextInfo? ctx = ExtractContextInfo(m);
+        string? quotedId = ctx is { HasStanzaId: true } ? ctx.StanzaId : null;
+        string? quotedSender = ctx is { HasParticipant: true } ? ctx.Participant : null;
+        string? quotedText = ctx?.QuotedMessage is { } qm ? ExtractReadableText(qm) : null;
 
         if (m.ImageMessage is { } img)
         {
             return new MessageRecord(id, chatJid, senderJid, fromMe, timestampSeconds, MessageType.Image, img.HasCaption ? img.Caption : null,
-                img.HasMimetype ? img.Mimetype : null, img.HasDirectPath ? img.DirectPath : null, img.MediaKey?.ToByteArray(), img.FileSha256?.ToByteArray(), img.FileEncSha256?.ToByteArray());
+                img.HasMimetype ? img.Mimetype : null, img.HasDirectPath ? img.DirectPath : null, img.MediaKey?.ToByteArray(), img.FileSha256?.ToByteArray(), img.FileEncSha256?.ToByteArray(),
+                quotedId, quotedSender, quotedText, FileLength: img.HasFileLength ? img.FileLength : null);
         }
         if (m.StickerMessage is { } stk)
         {
             return new MessageRecord(id, chatJid, senderJid, fromMe, timestampSeconds, MessageType.Sticker, null,
-                stk.HasMimetype ? stk.Mimetype : null, stk.HasDirectPath ? stk.DirectPath : null, stk.MediaKey?.ToByteArray(), stk.FileSha256?.ToByteArray(), stk.FileEncSha256?.ToByteArray());
+                stk.HasMimetype ? stk.Mimetype : null, stk.HasDirectPath ? stk.DirectPath : null, stk.MediaKey?.ToByteArray(), stk.FileSha256?.ToByteArray(), stk.FileEncSha256?.ToByteArray(),
+                quotedId, quotedSender, quotedText, FileLength: stk.HasFileLength ? stk.FileLength : null);
         }
         if (m.VideoMessage is { } vid)
         {
             return new MessageRecord(id, chatJid, senderJid, fromMe, timestampSeconds, MessageType.Video, vid.HasCaption ? vid.Caption : null,
-                vid.HasMimetype ? vid.Mimetype : null, vid.HasDirectPath ? vid.DirectPath : null, vid.MediaKey?.ToByteArray(), vid.FileSha256?.ToByteArray(), vid.FileEncSha256?.ToByteArray());
+                vid.HasMimetype ? vid.Mimetype : null, vid.HasDirectPath ? vid.DirectPath : null, vid.MediaKey?.ToByteArray(), vid.FileSha256?.ToByteArray(), vid.FileEncSha256?.ToByteArray(),
+                quotedId, quotedSender, quotedText, FileLength: vid.HasFileLength ? vid.FileLength : null);
         }
         if (m.AudioMessage is { } aud)
         {
             return new MessageRecord(id, chatJid, senderJid, fromMe, timestampSeconds, MessageType.Audio, null,
-                aud.HasMimetype ? aud.Mimetype : null, aud.HasDirectPath ? aud.DirectPath : null, aud.MediaKey?.ToByteArray(), aud.FileSha256?.ToByteArray(), aud.FileEncSha256?.ToByteArray());
+                aud.HasMimetype ? aud.Mimetype : null, aud.HasDirectPath ? aud.DirectPath : null, aud.MediaKey?.ToByteArray(), aud.FileSha256?.ToByteArray(), aud.FileEncSha256?.ToByteArray(),
+                quotedId, quotedSender, quotedText, FileLength: aud.HasFileLength ? aud.FileLength : null);
         }
         if (m.DocumentMessage is { } doc)
         {
             string? docText = doc.HasCaption ? doc.Caption : (doc.HasFileName ? doc.FileName : null);
             return new MessageRecord(id, chatJid, senderJid, fromMe, timestampSeconds, MessageType.Document, docText,
-                doc.HasMimetype ? doc.Mimetype : null, doc.HasDirectPath ? doc.DirectPath : null, doc.MediaKey?.ToByteArray(), doc.FileSha256?.ToByteArray(), doc.FileEncSha256?.ToByteArray());
+                doc.HasMimetype ? doc.Mimetype : null, doc.HasDirectPath ? doc.DirectPath : null, doc.MediaKey?.ToByteArray(), doc.FileSha256?.ToByteArray(), doc.FileEncSha256?.ToByteArray(),
+                quotedId, quotedSender, quotedText, FileLength: doc.HasFileLength ? doc.FileLength : null);
         }
         if (m.ProtocolMessage is not null)
         {
             return new MessageRecord(id, chatJid, senderJid, fromMe, timestampSeconds, MessageType.Protocol, null);
         }
 
-        string? text = m.HasConversation
+        string? text = ExtractReadableText(m);
+        MessageType msgType = text is not null ? MessageType.Text : MessageType.Unknown;
+        return new MessageRecord(id, chatJid, senderJid, fromMe, timestampSeconds, msgType, text,
+            QuotedMessageId: quotedId, QuotedSenderJid: quotedSender, QuotedText: quotedText);
+    }
+
+    private static ContextInfo? ExtractContextInfo(Message m) =>
+        m.ExtendedTextMessage?.ContextInfo
+        ?? m.ImageMessage?.ContextInfo
+        ?? m.VideoMessage?.ContextInfo
+        ?? m.AudioMessage?.ContextInfo
+        ?? m.DocumentMessage?.ContextInfo
+        ?? m.StickerMessage?.ContextInfo
+        ?? m.MusicMessage?.ContextInfo;
+
+    private static string? ExtractReadableText(Message m) =>
+        m.HasConversation
             ? m.Conversation
             : (m.ExtendedTextMessage is { HasText: true } ext
                 ? ext.Text
@@ -841,10 +996,9 @@ public sealed class MessageReceiver
                     ?? (m.EventMessage is { HasName: true } evt ? evt.Name : null)
                     ?? (m.LocationMessage is { } loc ? (loc.HasName ? loc.Name : (loc.HasAddress ? loc.Address : $"{loc.DegreesLatitude},{loc.DegreesLongitude}")) : null)
                     ?? (m.LiveLocationMessage is { HasCaption: true } live ? live.Caption : null)
+                    ?? (m.MusicMessage?.EmbeddedMusic is { } em ? $"{em.Author} - {em.Title}" : null)
+                    ?? (m.StatusQuestionAnswerMessage is { HasText: true } sqa ? sqa.Text : null)
                     ?? (m.ReactionMessage is { HasText: true } rx ? rx.Text : null));
-        MessageType msgType = text is not null ? MessageType.Text : MessageType.Unknown;
-        return new MessageRecord(id, chatJid, senderJid, fromMe, timestampSeconds, msgType, text);
-    }
 
     private bool IsOwnUser(string user) =>
         (_credentials.Pn is Jid pn && string.Equals(pn.User, user, StringComparison.Ordinal))

@@ -97,14 +97,16 @@ internal sealed class SqliteHistoryStore : IMessageHistoryStore
             using var cmd = conn.CreateCommand();
             cmd.CommandText = beforeTimestamp.HasValue
                 ? """
-                  SELECT id, chat_jid, sender_jid, from_me, timestamp, type, text, mime_type, direct_path, media_key, file_hash, file_enc_hash
+                  SELECT id, chat_jid, sender_jid, from_me, timestamp, type, text, mime_type, direct_path, media_key, file_hash, file_enc_hash,
+                         quoted_message_id, quoted_sender_jid, quoted_text, edited_timestamp, is_revoked, file_length, reactions_json
                   FROM messages
                   WHERE device_id = $deviceId AND chat_jid = $chatJid AND timestamp < $beforeTs
                   ORDER BY timestamp DESC, id DESC
                   LIMIT $limit;
                   """
                 : """
-                  SELECT id, chat_jid, sender_jid, from_me, timestamp, type, text, mime_type, direct_path, media_key, file_hash, file_enc_hash
+                  SELECT id, chat_jid, sender_jid, from_me, timestamp, type, text, mime_type, direct_path, media_key, file_hash, file_enc_hash,
+                         quoted_message_id, quoted_sender_jid, quoted_text, edited_timestamp, is_revoked, file_length, reactions_json
                   FROM messages
                   WHERE device_id = $deviceId AND chat_jid = $chatJid
                   ORDER BY timestamp DESC, id DESC
@@ -122,24 +124,294 @@ internal sealed class SqliteHistoryStore : IMessageHistoryStore
             using var reader = await cmd.ExecuteReaderAsync(token).ConfigureAwait(false);
             while (await reader.ReadAsync(token).ConfigureAwait(false))
             {
-                results.Add(new MessageRecord(
-                    Id: reader.GetString(0),
-                    RemoteJid: reader.GetString(1),
-                    SenderJid: reader.IsDBNull(2) ? null : reader.GetString(2),
-                    FromMe: reader.GetInt64(3) != 0,
-                    Timestamp: unchecked((ulong)reader.GetInt64(4)),
-                    Type: (MessageType)reader.GetInt32(5),
-                    Text: reader.IsDBNull(6) ? null : reader.GetString(6),
-                    MimeType: reader.IsDBNull(7) ? null : reader.GetString(7),
-                    DirectPath: reader.IsDBNull(8) ? null : reader.GetString(8),
-                    MediaKey: reader.IsDBNull(9) ? null : (byte[])reader.GetValue(9),
-                    FileHash: reader.IsDBNull(10) ? null : (byte[])reader.GetValue(10),
-                    FileEncHash: reader.IsDBNull(11) ? null : (byte[])reader.GetValue(11)));
+                results.Add(ReadMessageRecord(reader));
             }
 
             return results;
         }, ct));
     }
+
+    public ValueTask<IReadOnlyList<ChatSummary>> GetChatsAsync(
+        int limit = 50,
+        int offset = 0,
+        bool? archived = null,
+        CancellationToken ct = default)
+    {
+        if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit), "Limit must be positive.");
+        if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset), "Offset cannot be negative.");
+
+        return new(_runner.RunReadAsync<IReadOnlyList<ChatSummary>>(async (conn, token) =>
+        {
+            var results = new List<ChatSummary>();
+            using var cmd = conn.CreateCommand();
+            string archiveFilter = archived.HasValue ? " AND c.archived = $archived" : string.Empty;
+            cmd.CommandText = $"""
+                SELECT c.id, c.name, c.unread_count, c.last_msg_timestamp, c.archived, c.pinned,
+                       c.mute_end_timestamp, c.draft_text, c.draft_timestamp_ms,
+                       m.text, m.type
+                FROM chats c
+                LEFT JOIN messages m ON m.chat_jid = c.id AND m.device_id = c.device_id
+                  AND m.rowid = (
+                      SELECT m2.rowid FROM messages m2
+                      WHERE m2.chat_jid = c.id AND m2.device_id = c.device_id
+                      ORDER BY m2.timestamp DESC, m2.id DESC
+                      LIMIT 1
+                  )
+                WHERE c.device_id = $deviceId{archiveFilter}
+                ORDER BY c.pinned DESC, c.last_msg_timestamp DESC, c.id ASC
+                LIMIT $limit OFFSET $offset;
+                """;
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            if (archived.HasValue) cmd.Parameters.AddWithValue("$archived", archived.Value ? 1 : 0);
+            cmd.Parameters.AddWithValue("$limit", limit);
+            cmd.Parameters.AddWithValue("$offset", offset);
+
+            using var reader = await cmd.ExecuteReaderAsync(token).ConfigureAwait(false);
+            while (await reader.ReadAsync(token).ConfigureAwait(false))
+            {
+                results.Add(new ChatSummary(
+                    ChatJid: reader.GetString(0),
+                    Name: reader.IsDBNull(1) ? null : reader.GetString(1),
+                    UnreadCount: unchecked((uint)Math.Max(0, reader.GetInt64(2))),
+                    LastMsgTimestamp: unchecked((ulong)Math.Max(0, reader.GetInt64(3))),
+                    Archived: reader.GetInt64(4) != 0,
+                    Pinned: reader.GetInt64(5) != 0,
+                    MuteEndTimestamp: reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                    DraftText: reader.IsDBNull(7) ? null : reader.GetString(7),
+                    DraftTimestampMs: reader.IsDBNull(8) ? null : reader.GetInt64(8),
+                    LastMessageText: reader.IsDBNull(9) ? null : reader.GetString(9),
+                    LastMessageType: reader.IsDBNull(10) ? MessageType.Unknown : (MessageType)reader.GetInt32(10)));
+            }
+            return results;
+        }, ct));
+    }
+
+    public ValueTask<IReadOnlyList<MessageRecord>> SearchMessagesAsync(
+        string query,
+        string? chatJid = null,
+        int limit = 50,
+        CancellationToken ct = default)
+    {
+        if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit), "Limit must be positive.");
+        string matchExpr = BuildFtsMatchExpression(query);
+        if (string.IsNullOrEmpty(matchExpr))
+        {
+            return new(Array.Empty<MessageRecord>());
+        }
+
+        return new(_runner.RunReadAsync<IReadOnlyList<MessageRecord>>(async (conn, token) =>
+        {
+            var results = new List<MessageRecord>();
+            using var cmd = conn.CreateCommand();
+            string chatFilter = string.IsNullOrEmpty(chatJid) ? string.Empty : " AND m.chat_jid = $chatJid";
+            cmd.CommandText = $"""
+                SELECT m.id, m.chat_jid, m.sender_jid, m.from_me, m.timestamp, m.type, m.text, m.mime_type,
+                       m.direct_path, m.media_key, m.file_hash, m.file_enc_hash,
+                       m.quoted_message_id, m.quoted_sender_jid, m.quoted_text, m.edited_timestamp,
+                       m.is_revoked, m.file_length, m.reactions_json
+                FROM messages_fts f
+                JOIN messages m ON m.rowid = f.rowid
+                WHERE m.device_id = $deviceId AND messages_fts MATCH $match{chatFilter}
+                ORDER BY m.timestamp DESC, m.id DESC
+                LIMIT $limit;
+                """;
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            cmd.Parameters.AddWithValue("$match", matchExpr);
+            if (!string.IsNullOrEmpty(chatJid)) cmd.Parameters.AddWithValue("$chatJid", chatJid);
+            cmd.Parameters.AddWithValue("$limit", limit);
+
+            using var reader = await cmd.ExecuteReaderAsync(token).ConfigureAwait(false);
+            while (await reader.ReadAsync(token).ConfigureAwait(false))
+            {
+                results.Add(ReadMessageRecord(reader));
+            }
+            return results;
+        }, ct));
+    }
+
+    public ValueTask<IReadOnlyList<ContactRecord>> SearchContactsAsync(
+        string query,
+        int limit = 50,
+        CancellationToken ct = default)
+    {
+        if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit), "Limit must be positive.");
+        string pattern = string.IsNullOrWhiteSpace(query) ? "%" : $"%{query.Trim()}%";
+
+        return new(_runner.RunReadAsync<IReadOnlyList<ContactRecord>>(async (conn, token) =>
+        {
+            var results = new List<ContactRecord>();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT jid, name, pushname, phone_number, is_address_book
+                FROM contacts
+                WHERE device_id = $deviceId
+                  AND (jid LIKE $pattern OR name LIKE $pattern OR pushname LIKE $pattern OR phone_number LIKE $pattern)
+                ORDER BY is_address_book DESC, COALESCE(NULLIF(name, ''), NULLIF(pushname, ''), jid) ASC
+                LIMIT $limit;
+                """;
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            cmd.Parameters.AddWithValue("$pattern", pattern);
+            cmd.Parameters.AddWithValue("$limit", limit);
+
+            using var reader = await cmd.ExecuteReaderAsync(token).ConfigureAwait(false);
+            while (await reader.ReadAsync(token).ConfigureAwait(false))
+            {
+                results.Add(new ContactRecord(
+                    Jid: reader.GetString(0),
+                    Name: reader.IsDBNull(1) ? null : reader.GetString(1),
+                    Pushname: reader.IsDBNull(2) ? null : reader.GetString(2),
+                    PhoneNumber: reader.IsDBNull(3) ? null : reader.GetString(3),
+                    IsAddressBookContact: reader.GetInt64(4) != 0));
+            }
+            return results;
+        }, ct));
+    }
+
+    public ValueTask SaveDraftAsync(string chatJid, string? draftText, long timestampMs, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(chatJid);
+        return new(_runner.RunWriteTransactionAsync(async (conn, token) =>
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO chats (id, device_id, name, unread_count, last_msg_timestamp, archived, updated_at, draft_text, draft_timestamp_ms)
+                VALUES ($chatJid, $deviceId, NULL, 0, 0, 0, $now, $draftText, $draftTs)
+                ON CONFLICT(id, device_id) DO UPDATE SET
+                    draft_text = excluded.draft_text,
+                    draft_timestamp_ms = excluded.draft_timestamp_ms,
+                    updated_at = excluded.updated_at;
+                """;
+            cmd.Parameters.AddWithValue("$chatJid", chatJid);
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            cmd.Parameters.AddWithValue("$now", now);
+            cmd.Parameters.AddWithValue("$draftText", (object?)draftText ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$draftTs", string.IsNullOrEmpty(draftText) ? DBNull.Value : timestampMs);
+            await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, ct));
+    }
+
+    public ValueTask ApplyMessageEditAsync(string chatJid, string messageId, string? newText, long editedTimestampSeconds, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(chatJid);
+        ArgumentException.ThrowIfNullOrEmpty(messageId);
+        return new(_runner.RunWriteTransactionAsync(async (conn, token) =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                UPDATE messages
+                SET text = $newText,
+                    edited_timestamp = $editedTs
+                WHERE device_id = $deviceId AND chat_jid = $chatJid AND id = $id;
+                """;
+            cmd.Parameters.AddWithValue("$newText", (object?)newText ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$editedTs", editedTimestampSeconds);
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            cmd.Parameters.AddWithValue("$chatJid", chatJid);
+            cmd.Parameters.AddWithValue("$id", messageId);
+            await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, ct));
+    }
+
+    public ValueTask MarkMessageRevokedAsync(string chatJid, string messageId, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(chatJid);
+        ArgumentException.ThrowIfNullOrEmpty(messageId);
+        return new(_runner.RunWriteTransactionAsync(async (conn, token) =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                UPDATE messages
+                SET is_revoked = 1,
+                    text = NULL
+                WHERE device_id = $deviceId AND chat_jid = $chatJid AND id = $id;
+                """;
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            cmd.Parameters.AddWithValue("$chatJid", chatJid);
+            cmd.Parameters.AddWithValue("$id", messageId);
+            await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, ct));
+    }
+
+    public ValueTask UpsertMessageReactionAsync(string chatJid, string messageId, string senderJid, string emoji, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(chatJid);
+        ArgumentException.ThrowIfNullOrEmpty(messageId);
+        ArgumentException.ThrowIfNullOrEmpty(senderJid);
+        return new(_runner.RunWriteTransactionAsync(async (conn, token) =>
+        {
+            string? existingJson = null;
+            using (var readCmd = conn.CreateCommand())
+            {
+                readCmd.CommandText = "SELECT reactions_json FROM messages WHERE device_id = $deviceId AND chat_jid = $chatJid AND id = $id;";
+                readCmd.Parameters.AddWithValue("$deviceId", _deviceId);
+                readCmd.Parameters.AddWithValue("$chatJid", chatJid);
+                readCmd.Parameters.AddWithValue("$id", messageId);
+                object? scalar = await readCmd.ExecuteScalarAsync(token).ConfigureAwait(false);
+                existingJson = scalar as string;
+            }
+
+            Dictionary<string, string> reactions = string.IsNullOrEmpty(existingJson)
+                ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                : (System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(existingJson)
+                    ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+
+            if (string.IsNullOrEmpty(emoji))
+            {
+                reactions.Remove(senderJid);
+            }
+            else
+            {
+                reactions[senderJid] = emoji;
+            }
+
+            string? updatedJson = reactions.Count == 0
+                ? null
+                : System.Text.Json.JsonSerializer.Serialize(reactions, new System.Text.Json.JsonSerializerOptions
+                {
+                    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                });
+            using var updCmd = conn.CreateCommand();
+            updCmd.CommandText = "UPDATE messages SET reactions_json = $json WHERE device_id = $deviceId AND chat_jid = $chatJid AND id = $id;";
+            updCmd.Parameters.AddWithValue("$json", (object?)updatedJson ?? DBNull.Value);
+            updCmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            updCmd.Parameters.AddWithValue("$chatJid", chatJid);
+            updCmd.Parameters.AddWithValue("$id", messageId);
+            await updCmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, ct));
+    }
+
+    private static string BuildFtsMatchExpression(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return string.Empty;
+        }
+        string[] tokens = query.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return string.Join(" AND ", tokens.Select(t => $"\"{t.Replace("\"", "\"\"", StringComparison.Ordinal)}\"*"));
+    }
+
+    private static MessageRecord ReadMessageRecord(SqliteDataReader reader) =>
+        new(
+            Id: reader.GetString(0),
+            RemoteJid: reader.GetString(1),
+            SenderJid: reader.IsDBNull(2) ? null : reader.GetString(2),
+            FromMe: reader.GetInt64(3) != 0,
+            Timestamp: unchecked((ulong)reader.GetInt64(4)),
+            Type: (MessageType)reader.GetInt32(5),
+            Text: reader.IsDBNull(6) ? null : reader.GetString(6),
+            MimeType: reader.IsDBNull(7) ? null : reader.GetString(7),
+            DirectPath: reader.IsDBNull(8) ? null : reader.GetString(8),
+            MediaKey: reader.IsDBNull(9) ? null : (byte[])reader.GetValue(9),
+            FileHash: reader.IsDBNull(10) ? null : (byte[])reader.GetValue(10),
+            FileEncHash: reader.IsDBNull(11) ? null : (byte[])reader.GetValue(11),
+            QuotedMessageId: reader.IsDBNull(12) ? null : reader.GetString(12),
+            QuotedSenderJid: reader.IsDBNull(13) ? null : reader.GetString(13),
+            QuotedText: reader.IsDBNull(14) ? null : reader.GetString(14),
+            EditedTimestamp: reader.IsDBNull(15) ? null : reader.GetInt64(15),
+            IsRevoked: !reader.IsDBNull(16) && reader.GetInt64(16) != 0,
+            FileLength: reader.IsDBNull(17) ? null : unchecked((ulong)reader.GetInt64(17)),
+            ReactionsJson: reader.IsDBNull(18) ? null : reader.GetString(18));
 
     public ValueTask<ActiveMessageRange?> GetMessageRangeAsync(string chatJid, CancellationToken ct = default)
     {
@@ -395,11 +667,15 @@ internal sealed class SqliteHistoryStore : IMessageHistoryStore
         cmd.CommandText = """
             INSERT INTO messages (
                 chat_jid, id, device_id, sender_jid, from_me, timestamp, type,
-                text, mime_type, direct_path, media_key, file_hash, file_enc_hash
+                text, mime_type, direct_path, media_key, file_hash, file_enc_hash,
+                quoted_message_id, quoted_sender_jid, quoted_text, edited_timestamp,
+                is_revoked, file_length, reactions_json
             )
             VALUES (
                 $chatJid, $id, $deviceId, $senderJid, $fromMe, $timestamp, $type,
-                $text, $mimeType, $directPath, $mediaKey, $fileHash, $fileEncHash
+                $text, $mimeType, $directPath, $mediaKey, $fileHash, $fileEncHash,
+                $quotedMessageId, $quotedSenderJid, $quotedText, $editedTimestamp,
+                $isRevoked, $fileLength, $reactionsJson
             )
             ON CONFLICT(chat_jid, id, device_id) DO UPDATE SET
                 sender_jid = COALESCE(excluded.sender_jid, messages.sender_jid),
@@ -408,7 +684,14 @@ internal sealed class SqliteHistoryStore : IMessageHistoryStore
                 direct_path = COALESCE(excluded.direct_path, messages.direct_path),
                 media_key = COALESCE(excluded.media_key, messages.media_key),
                 file_hash = COALESCE(excluded.file_hash, messages.file_hash),
-                file_enc_hash = COALESCE(excluded.file_enc_hash, messages.file_enc_hash);
+                file_enc_hash = COALESCE(excluded.file_enc_hash, messages.file_enc_hash),
+                quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id),
+                quoted_sender_jid = COALESCE(excluded.quoted_sender_jid, messages.quoted_sender_jid),
+                quoted_text = COALESCE(excluded.quoted_text, messages.quoted_text),
+                edited_timestamp = COALESCE(excluded.edited_timestamp, messages.edited_timestamp),
+                is_revoked = MAX(messages.is_revoked, excluded.is_revoked),
+                file_length = COALESCE(excluded.file_length, messages.file_length),
+                reactions_json = COALESCE(excluded.reactions_json, messages.reactions_json);
             """;
         cmd.Parameters.Add("$chatJid", SqliteType.Text);
         cmd.Parameters.Add("$id", SqliteType.Text);
@@ -423,6 +706,13 @@ internal sealed class SqliteHistoryStore : IMessageHistoryStore
         cmd.Parameters.Add("$mediaKey", SqliteType.Blob);
         cmd.Parameters.Add("$fileHash", SqliteType.Blob);
         cmd.Parameters.Add("$fileEncHash", SqliteType.Blob);
+        cmd.Parameters.Add("$quotedMessageId", SqliteType.Text);
+        cmd.Parameters.Add("$quotedSenderJid", SqliteType.Text);
+        cmd.Parameters.Add("$quotedText", SqliteType.Text);
+        cmd.Parameters.Add("$editedTimestamp", SqliteType.Integer);
+        cmd.Parameters.Add("$isRevoked", SqliteType.Integer);
+        cmd.Parameters.Add("$fileLength", SqliteType.Integer);
+        cmd.Parameters.Add("$reactionsJson", SqliteType.Text);
         return cmd;
     }
 
@@ -440,5 +730,12 @@ internal sealed class SqliteHistoryStore : IMessageHistoryStore
         cmd.Parameters["$mediaKey"].Value = (object?)msg.MediaKey ?? DBNull.Value;
         cmd.Parameters["$fileHash"].Value = (object?)msg.FileHash ?? DBNull.Value;
         cmd.Parameters["$fileEncHash"].Value = (object?)msg.FileEncHash ?? DBNull.Value;
+        cmd.Parameters["$quotedMessageId"].Value = (object?)msg.QuotedMessageId ?? DBNull.Value;
+        cmd.Parameters["$quotedSenderJid"].Value = (object?)msg.QuotedSenderJid ?? DBNull.Value;
+        cmd.Parameters["$quotedText"].Value = (object?)msg.QuotedText ?? DBNull.Value;
+        cmd.Parameters["$editedTimestamp"].Value = (object?)msg.EditedTimestamp ?? DBNull.Value;
+        cmd.Parameters["$isRevoked"].Value = msg.IsRevoked ? 1 : 0;
+        cmd.Parameters["$fileLength"].Value = msg.FileLength.HasValue ? unchecked((long)msg.FileLength.Value) : DBNull.Value;
+        cmd.Parameters["$reactionsJson"].Value = (object?)msg.ReactionsJson ?? DBNull.Value;
     }
 }

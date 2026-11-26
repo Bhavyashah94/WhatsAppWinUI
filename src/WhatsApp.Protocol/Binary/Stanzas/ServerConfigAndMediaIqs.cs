@@ -12,14 +12,33 @@ public sealed record AbPropsResponse(
     bool DeltaUpdate,
     IReadOnlyDictionary<uint, string> ExperimentProps);
 
+public sealed record GroupPropsResponse(
+    string? Hash,
+    IReadOnlyDictionary<uint, string> ExperimentProps);
+
 /// <summary>
 /// Server-driven A/B experiment configuration IQ builder &amp; parser (<c>xmlns="abt"</c>).
-/// Mirrors <c>wacore/src/iq/props.rs</c>.
+/// Mirrors <c>wacore/src/iq/props.rs</c> and live <c>WAWebABPropsConfigs</c>.
 /// </summary>
 public static class AbPropsIq
 {
     public const string Xmlns = "abt";
     public const string ProtocolVersion = "1";
+
+    // Verified live WAWebABPropsConfigs + wacore::iq::abprops numeric IDs
+    public const uint PropGroupHistorySend = 15_313;
+    public const uint PropGroupHistoryReceive = 15_311;
+    public const uint PropGroupHistoryCountLimit = 18_405;
+    public const uint PropGroupHistoryTimeLimitSecs = 18_406;
+    public const uint PropGroupHistorySendGroupLevel = 23_245;
+    public const uint PropGroupHistoryBundleTimeLimitReceiverSecs = 25_910;
+    public const uint PropGroupMaxSubject = 14_801;
+    public const uint PropGroupDescriptionLength = 14_778;
+    public const uint PropGroupSizeLimit = 1_304;
+    public const uint PropCommunityAnnouncementGroupSizeLimit = 2_774;
+    public const uint PropParentGroupLinkLimitCommunityCreation = 1_990;
+    public const uint PropEventsCreateCagEnabled = 9_932;
+    public const uint PropWebCommunitiesGeneralChatV2 = 8_580;
 
     public static Node BuildGetProps(string iqId, string? hash = null, uint? refreshId = null)
     {
@@ -71,6 +90,47 @@ public static class AbPropsIq
             refreshId,
             delta,
             props);
+    }
+
+    public static Node BuildGetGroupProps(string iqId, Jid groupJid)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(iqId);
+        return StanzaBuilder.Iq(
+            iqId,
+            "get",
+            Xmlns,
+            StanzaBuilder.ServerPn,
+            new Node("props", new Dictionary<string, NodeValue>(StringComparer.Ordinal)
+            {
+                ["group"] = groupJid.ToNonAd()
+            }));
+    }
+
+    public static GroupPropsResponse ParseGroupPropsResponse(Node responseNode)
+    {
+        ArgumentNullException.ThrowIfNull(responseNode);
+        Node propsNode = responseNode.Tag == "props"
+            ? responseNode
+            : responseNode.GetChild("props")
+                ?? throw new InvalidDataException("Missing <props> child in group A/B props response.");
+
+        var props = new Dictionary<uint, string>();
+        foreach (Node child in propsNode.GetChildren("prop"))
+        {
+            if (child.GetAttr("config_code") is { Length: > 0 } codeStr
+                && uint.TryParse(codeStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out uint code)
+                && code > 0
+                && child.GetAttr("config_value") is { } val)
+            {
+                if (props.TryGetValue(code, out string? prev) && !string.Equals(prev, val, StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException($"Conflicting group experiment values for code {code}.");
+                }
+                props[code] = val;
+            }
+        }
+
+        return new GroupPropsResponse(propsNode.GetAttr("hash"), props);
     }
 }
 

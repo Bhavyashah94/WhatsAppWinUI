@@ -32,6 +32,11 @@ public sealed class NoiseHandshakeOptions
     public bool ForceFullHandshake { get; init; }
 
     /// <summary>
+    /// Optional post-quantum Noise handshake mode (<c>WA_CLASSICAL</c> when unset).
+    /// </summary>
+    public global::Whatsapp.HandshakeMessage.Types.HandshakePqMode? PqMode { get; init; }
+
+    /// <summary>
     /// Optional builder override for <c>ClientPayload</c> bytes.
     /// </summary>
     public Func<DeviceCredentials, byte[]>? ClientPayloadBuilder { get; init; }

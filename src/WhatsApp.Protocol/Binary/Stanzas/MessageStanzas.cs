@@ -99,6 +99,10 @@ public static class MessageStanzas
             || m.TemplateButtonReplyMessage is not null
             || m.RequestPhoneNumberMessage is not null
             || m.EncCommentMessage is not null
+            || m.MessageHistoryNotice is not null
+            || m.StatusQuestionAnswerMessage is not null
+            || m.StatusStickerInteractionMessage is not null
+            || m.StatusQuotedMessage is not null
             || m.AlbumMessage is not null
             || m.RichResponseMessage is not null)
         {
@@ -126,6 +130,8 @@ public static class MessageStanzas
         if (m.ContactMessage is not null) return "vcard";
         if (m.ContactsArrayMessage is not null) return "contact_array";
         if (m.ExtendedTextMessage is { MatchedText.Length: > 0 }) return "url";
+        if (m.GroupInviteMessage is not null) return "url";
+        if (m.MessageHistoryBundle is not null) return "group_history";
         return null;
     }
 
@@ -138,6 +144,10 @@ public static class MessageStanzas
         Message m = UnwrapClassificationMessage(message);
         return m.ProtocolMessage?.Type == Message.Types.ProtocolMessage.Types.Type.Revoke
             || m.ProtocolMessage?.Type == Message.Types.ProtocolMessage.Types.Type.MessageEdit
+            || m.ProtocolMessage?.Type == Message.Types.ProtocolMessage.Types.Type.GroupMemberLabelChange
+            || m.ProtocolMessage?.Type == Message.Types.ProtocolMessage.Types.Type.EphemeralSyncResponse
+            || m.ProtocolMessage?.Type == Message.Types.ProtocolMessage.Types.Type.RequestWelcomeMessage
+            || m.MessageHistoryNotice is not null
             || m.ReactionMessage is not null
             || m.EncReactionMessage is not null
             || m.EncEventResponseMessage is not null
@@ -146,6 +156,41 @@ public static class MessageStanzas
             || m.PollAddOptionMessage is not null
             || m.KeepInChatMessage is not null
             || m.PinInChatMessage is not null;
+    }
+
+    public static Node? InferMetaNode(Message message)
+    {
+        Message m = UnwrapClassificationMessage(message);
+        var metaAttrs = new Dictionary<string, NodeValue>(StringComparer.Ordinal);
+
+        if (m.PollCreationMessage is not null || m.PollCreationMessageV2 is not null
+            || m.PollCreationMessageV3 is not null || m.PollCreationMessageV5 is not null || m.PollCreationMessageV6 is not null)
+        {
+            metaAttrs["polltype"] = "creation";
+        }
+        else if (m.PollUpdateMessage?.Vote is not null)
+        {
+            metaAttrs["polltype"] = "vote";
+        }
+        else if (m.EventMessage is not null)
+        {
+            metaAttrs["event_type"] = "creation";
+        }
+        else if (m.EncEventResponseMessage is not null)
+        {
+            metaAttrs["event_type"] = "response";
+        }
+        else if (m.SecretEncryptedMessage?.SecretEncType == Message.Types.SecretEncryptedMessage.Types.SecretEncType.EventEdit)
+        {
+            metaAttrs["event_type"] = "edit";
+        }
+        else if (m.ProtocolMessage?.MemberLabel is { } ml)
+        {
+            metaAttrs["appdata"] = "member_tag";
+            metaAttrs["tag_reason"] = string.IsNullOrEmpty(ml.Label) ? "user_delete" : "user_update";
+        }
+
+        return metaAttrs.Count > 0 ? new Node("meta", metaAttrs) : null;
     }
 
     public static Node BuildEncryptedEncNode(
@@ -296,6 +341,68 @@ public static class MessageStanzas
         if (!string.IsNullOrEmpty(editAttribute))
         {
             attrs["edit"] = editAttribute;
+        }
+        if (!string.IsNullOrEmpty(addressingMode))
+        {
+            attrs["addressing_mode"] = addressingMode;
+        }
+
+        return new Node("message", attrs, new NodeContent.NodesContent(children));
+    }
+
+    /// <summary>
+    /// Builds a pairwise-encrypted <c>&lt;message to="{groupJid}"&gt;</c> stanza with
+    /// <c>&lt;participants&gt;&lt;to jid="..."&gt;&lt;enc ...&gt;&lt;/enc&gt;&lt;/to&gt;...&lt;/participants&gt;</c>
+    /// and NO <c>skmsg</c> node — used for selective Group History Bundle delivery so only
+    /// opted-in newly added receivers and own companion devices receive media keys.
+    /// </summary>
+    public static Node BuildGroupDirectStanza(
+        string messageId,
+        Jid groupJid,
+        string stanzaType,
+        IReadOnlyList<(Jid DeviceJid, string EncType, byte[] Ciphertext)> participantDevices,
+        string? mediaType = null,
+        bool hideDecryptFail = false,
+        string? phash = null,
+        byte[]? deviceIdentityBytes = null,
+        ReportingTokenResult? reportingToken = null,
+        string? addressingMode = null,
+        IReadOnlyList<Node>? extraNodes = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(messageId);
+        var toNodes = new Node[participantDevices.Count];
+        for (int i = 0; i < participantDevices.Count; i++)
+        {
+            var (devJid, encType, ct) = participantDevices[i];
+            toNodes[i] = new Node(
+                "to",
+                new Dictionary<string, NodeValue>(StringComparer.Ordinal) { ["jid"] = devJid },
+                new[] { BuildEncryptedEncNode(encType, ct, mediaType, hideDecryptFail) });
+        }
+
+        var children = new List<Node> { new("participants", toNodes) };
+        if (deviceIdentityBytes is { Length: > 0 })
+        {
+            children.Add(new Node("device-identity", deviceIdentityBytes));
+        }
+        if (reportingToken is not null)
+        {
+            children.Add(BuildReportingNode(reportingToken));
+        }
+        if (extraNodes is { Count: > 0 })
+        {
+            children.AddRange(extraNodes);
+        }
+
+        var attrs = new Dictionary<string, NodeValue>(StringComparer.Ordinal)
+        {
+            ["id"] = messageId,
+            ["to"] = groupJid.ToNonAd(),
+            ["type"] = stanzaType
+        };
+        if (!string.IsNullOrEmpty(phash))
+        {
+            attrs["phash"] = phash;
         }
         if (!string.IsNullOrEmpty(addressingMode))
         {

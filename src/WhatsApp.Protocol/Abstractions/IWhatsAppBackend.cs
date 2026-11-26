@@ -115,6 +115,14 @@ public interface IMessageHistoryStore
     ValueTask<IReadOnlyList<MessageRecord>> GetMessagesAsync(string chatJid, ulong? beforeTimestamp, int limit, CancellationToken ct = default);
     ValueTask<ActiveMessageRange?> GetMessageRangeAsync(string chatJid, CancellationToken ct = default);
     ValueTask UpdateMessageRangeAsync(ActiveMessageRange range, CancellationToken ct = default);
+
+    ValueTask<IReadOnlyList<ChatSummary>> GetChatsAsync(int limit = 50, int offset = 0, bool? archived = null, CancellationToken ct = default);
+    ValueTask<IReadOnlyList<MessageRecord>> SearchMessagesAsync(string query, string? chatJid = null, int limit = 50, CancellationToken ct = default);
+    ValueTask<IReadOnlyList<ContactRecord>> SearchContactsAsync(string query, int limit = 50, CancellationToken ct = default);
+    ValueTask SaveDraftAsync(string chatJid, string? draftText, long timestampMs, CancellationToken ct = default);
+    ValueTask ApplyMessageEditAsync(string chatJid, string messageId, string? newText, long editedTimestampSeconds, CancellationToken ct = default);
+    ValueTask MarkMessageRevokedAsync(string chatJid, string messageId, CancellationToken ct = default);
+    ValueTask UpsertMessageReactionAsync(string chatJid, string messageId, string senderJid, string emoji, CancellationToken ct = default);
 }
 
 /// <summary>

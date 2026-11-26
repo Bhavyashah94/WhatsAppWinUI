@@ -223,6 +223,50 @@ internal static class SqliteMigrations
 
             CREATE INDEX IF NOT EXISTS idx_sender_key_devices_group
                 ON sender_key_devices(group_jid, device_id);
+            """),
+        new(
+            Version: 4,
+            Name: "004_rich_history_and_fts",
+            Sql: """
+            ALTER TABLE chats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE chats ADD COLUMN mute_end_timestamp INTEGER;
+            ALTER TABLE chats ADD COLUMN draft_text TEXT;
+            ALTER TABLE chats ADD COLUMN draft_timestamp_ms INTEGER;
+
+            ALTER TABLE messages ADD COLUMN quoted_message_id TEXT;
+            ALTER TABLE messages ADD COLUMN quoted_sender_jid TEXT;
+            ALTER TABLE messages ADD COLUMN quoted_text TEXT;
+            ALTER TABLE messages ADD COLUMN edited_timestamp INTEGER;
+            ALTER TABLE messages ADD COLUMN is_revoked INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE messages ADD COLUMN file_length INTEGER;
+            ALTER TABLE messages ADD COLUMN reactions_json TEXT;
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                text,
+                quoted_text,
+                content='messages',
+                content_rowid='rowid',
+                tokenize='unicode61'
+            );
+
+            INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
+
+            CREATE TRIGGER IF NOT EXISTS trg_messages_fts_ai AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, text, quoted_text)
+                VALUES (new.rowid, new.text, new.quoted_text);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_messages_fts_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, text, quoted_text)
+                VALUES ('delete', old.rowid, old.text, old.quoted_text);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_messages_fts_au AFTER UPDATE OF text, quoted_text ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, text, quoted_text)
+                VALUES ('delete', old.rowid, old.text, old.quoted_text);
+                INSERT INTO messages_fts(rowid, text, quoted_text)
+                VALUES (new.rowid, new.text, new.quoted_text);
+            END;
             """)
     ];
 

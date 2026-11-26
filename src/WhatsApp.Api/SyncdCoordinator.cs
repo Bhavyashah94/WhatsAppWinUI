@@ -10,11 +10,16 @@ using WhatsApp.Protocol.Crypto;
 
 namespace WhatsApp.Api;
 
+public sealed record SyncdCoexOptions(
+    bool EnableCoexV2 = false,
+    bool PersistKeysOnlyAfterServerAck = false,
+    bool BatchedOrphanApply = false);
+
 /// <summary>
 /// Orchestrates AppState (<c>syncd</c>) inbound collection sync (external snapshots, external patch
 /// mutations, pagination, anti-tampering validation, <c>PushNameSetting</c> propagation) and
 /// serialized outbound mutation sends with <c>409</c> conflict absorption and rebuild.
-/// Mirrors <c>whatsapp-rust/src/client/app_state.rs</c> and <c>wacore/src/appstate_sync.rs</c>.
+/// Supports Syncd Coex V2 (<c>PersistKeysOnlyAfterServerAck</c>, <c>BatchedOrphanApply</c>).
 /// </summary>
 public sealed class SyncdCoordinator : IAsyncDisposable
 {
@@ -28,11 +33,14 @@ public sealed class SyncdCoordinator : IAsyncDisposable
     private readonly Func<string> _nextIqId;
     private readonly Func<WhatsAppEvent, ValueTask> _emitEventAsync;
     private readonly string _mediaHost;
+    private readonly SyncdCoexOptions _coexOptions;
 
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _collectionLocks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, AppStateCollectionState> _collectionStates = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ExpandedAppStateKeys> _expandedKeyCache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte[]> _pendingKeysAwaitingAck = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, List<(string Collection, SyncdPatch Patch)>> _orphanPatches = new(StringComparer.Ordinal);
 
     private long _fallbackIqSeq;
     private int _disposed;
@@ -42,14 +50,16 @@ public sealed class SyncdCoordinator : IAsyncDisposable
         IHttpClient httpClient,
         IqClient iqClient,
         Func<WhatsAppEvent, ValueTask>? emitEventAsync = null,
-        string? mediaHost = null)
+        string? mediaHost = null,
+        SyncdCoexOptions? coexOptions = null)
         : this(
             backend,
             httpClient,
             (node, token) => new ValueTask<Node>((iqClient ?? throw new ArgumentNullException(nameof(iqClient))).SendIqAsync(node, IqClient.DefaultTimeout, token)),
             () => iqClient.NextRequestId(),
             emitEventAsync,
-            mediaHost)
+            mediaHost,
+            coexOptions)
     {
     }
 
@@ -59,7 +69,8 @@ public sealed class SyncdCoordinator : IAsyncDisposable
         Func<Node, CancellationToken, ValueTask<Node>> sendIqAsync,
         Func<string>? nextIqId = null,
         Func<WhatsAppEvent, ValueTask>? emitEventAsync = null,
-        string? mediaHost = null)
+        string? mediaHost = null,
+        SyncdCoexOptions? coexOptions = null)
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
@@ -67,6 +78,59 @@ public sealed class SyncdCoordinator : IAsyncDisposable
         _nextIqId = nextIqId ?? (() => $"syncd-{Interlocked.Increment(ref _fallbackIqSeq)}");
         _emitEventAsync = emitEventAsync ?? (_ => ValueTask.CompletedTask);
         _mediaHost = string.IsNullOrWhiteSpace(mediaHost) ? DefaultMediaHost : mediaHost.Trim();
+        _coexOptions = coexOptions ?? new SyncdCoexOptions();
+    }
+
+    public int PendingOrphanCount => _orphanPatches.Values.Sum(static l => { lock (l) { return l.Count; } });
+    public int PendingKeyAckCount => _pendingKeysAwaitingAck.Count;
+
+    public async Task StageSyncKeyAsync(byte[] keyId, byte[] keyData, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(keyId);
+        ArgumentNullException.ThrowIfNull(keyData);
+        if (_coexOptions.PersistKeysOnlyAfterServerAck)
+        {
+            _pendingKeysAwaitingAck[Convert.ToHexStringLower(keyId)] = (byte[])keyData.Clone();
+            return;
+        }
+        await _backend.AppSync.SaveSyncKeyAsync(keyId, keyData, ct).ConfigureAwait(false);
+    }
+
+    public async Task CommitPendingSyncKeyAckAsync(byte[] keyId, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(keyId);
+        if (_pendingKeysAwaitingAck.TryRemove(Convert.ToHexStringLower(keyId), out byte[]? keyData))
+        {
+            await _backend.AppSync.SaveSyncKeyAsync(keyId, keyData, ct).ConfigureAwait(false);
+            await FlushOrphanPatchesAsync(ct).ConfigureAwait(false);
+        }
+    }
+
+    public async Task<int> FlushOrphanPatchesAsync(CancellationToken ct = default)
+    {
+        int applied = 0;
+        foreach (string keyHex in _orphanPatches.Keys.ToArray())
+        {
+            byte[] keyId = Convert.FromHexString(keyHex);
+            byte[]? keyBytes = await _backend.AppSync.GetSyncKeyAsync(keyId, ct).ConfigureAwait(false);
+            if (keyBytes is null)
+            {
+                continue;
+            }
+
+            if (!_orphanPatches.TryRemove(keyHex, out List<(string Collection, SyncdPatch Patch)>? batch))
+            {
+                continue;
+            }
+
+            foreach (IGrouping<string, SyncdPatch> grp in batch.GroupBy(static x => x.Collection, static x => x.Patch, StringComparer.Ordinal))
+            {
+                var list = new AppStateCollectionPatchList(grp.Key, false, grp.ToArray(), null, null);
+                var (decoded, _) = await ApplyCollectionPatchListAsync(list, validateMacs: true, ct).ConfigureAwait(false);
+                applied += decoded.Count;
+            }
+        }
+        return applied;
     }
 
     public async Task<IReadOnlyList<DecodedAppStateMutation>> SyncCollectionAsync(
@@ -357,16 +421,30 @@ public sealed class SyncdCoordinator : IAsyncDisposable
         foreach (SyncdPatch rawPatch in patchList.Patches)
         {
             SyncdPatch patch = await HydratePatchAsync(rawPatch, ct).ConfigureAwait(false);
-            var keyLookup = await PrefetchPatchKeysAsync(patch, ct).ConfigureAwait(false);
-            var prevMacLookup = await PrefetchPreviousValueMacsAsync(collection, patch, ct).ConfigureAwait(false);
+            ProcessedPatchResult patchResult;
+            try
+            {
+                var keyLookup = await PrefetchPatchKeysAsync(patch, ct).ConfigureAwait(false);
+                var prevMacLookup = await PrefetchPreviousValueMacsAsync(collection, patch, ct).ConfigureAwait(false);
 
-            ProcessedPatchResult patchResult = AppStateProcessor.ProcessPatch(
-                patch,
-                state,
-                id => ResolveCachedKey(keyLookup, id),
-                idx => prevMacLookup.GetValueOrDefault(Convert.ToHexStringLower(idx)),
-                collection,
-                validateMacs);
+                patchResult = AppStateProcessor.ProcessPatch(
+                    patch,
+                    state,
+                    id => ResolveCachedKey(keyLookup, id),
+                    idx => prevMacLookup.GetValueOrDefault(Convert.ToHexStringLower(idx)),
+                    collection,
+                    validateMacs);
+            }
+            catch (AppStateException ex) when (_coexOptions.BatchedOrphanApply && ex.Kind == AppStateErrorKind.KeyNotFound && patch.KeyId is { HasId: true })
+            {
+                string keyHex = Convert.ToHexStringLower(patch.KeyId.Id.Span);
+                List<(string Collection, SyncdPatch Patch)> bucket = _orphanPatches.GetOrAdd(keyHex, static _ => []);
+                lock (bucket)
+                {
+                    bucket.Add((collection, patch));
+                }
+                continue;
+            }
 
             if (patchResult.SnapshotMacDiverged)
             {
@@ -537,11 +615,164 @@ public sealed class SyncdCoordinator : IAsyncDisposable
         string? latestPushName = null;
         foreach (DecodedAppStateMutation mutation in mutations)
         {
-            if (mutation.Operation == SyncdMutation.Types.SyncdOperation.Set
-                && mutation.ActionValue?.PushNameSetting is { HasName: true } pushSetting
+            if (mutation.Operation == SyncdMutation.Types.SyncdOperation.Remove)
+            {
+                if (mutation.Index is ["contact", { Length: > 0 } removedJid, ..])
+                {
+                    long removeTs = mutation.ActionValue?.HasTimestamp == true ? mutation.ActionValue.Timestamp : 0;
+                    await _emitEventAsync(new ContactRemovedEvent(removedJid, removeTs)).ConfigureAwait(false);
+                }
+                continue;
+            }
+
+            if (mutation.Operation != SyncdMutation.Types.SyncdOperation.Set || mutation.ActionValue is null)
+            {
+                continue;
+            }
+
+            SyncActionValue av = mutation.ActionValue;
+            long ts = av.HasTimestamp ? av.Timestamp : 0;
+
+            if (av.PushNameSetting is { HasName: true } pushSetting
                 && !string.IsNullOrEmpty(pushSetting.Name))
             {
                 latestPushName = pushSetting.Name;
+            }
+
+            if (av.StatusPrivacy is { } sp)
+            {
+                await _emitEventAsync(new StatusPrivacyUpdatedEvent(
+                    sp.HasMode ? (int)sp.Mode : null,
+                    sp.UserJid.ToArray(),
+                    sp.HasShareToFb && sp.ShareToFb,
+                    sp.HasShareToIg && sp.ShareToIg)).ConfigureAwait(false);
+            }
+
+            if (av.UserStatusMuteAction is { } usm && mutation.Index.Count >= 2)
+            {
+                await _emitEventAsync(new UserStatusMuteUpdatedEvent(
+                    mutation.Index[1],
+                    usm.HasMuted && usm.Muted)).ConfigureAwait(false);
+            }
+
+            if (av.PrivacySettingDisableLinkPreviewsAction is { HasIsPreviewsDisabled: true } lp)
+            {
+                await _emitEventAsync(new LinkPreviewsDisabledUpdatedEvent(lp.IsPreviewsDisabled, ts)).ConfigureAwait(false);
+            }
+
+            if (av.UnarchiveChatsSetting is { HasUnarchiveChats: true } ua)
+            {
+                await _emitEventAsync(new UnarchiveChatsSettingUpdatedEvent(ua.UnarchiveChats, ts)).ConfigureAwait(false);
+            }
+
+            if (av.PrivacySettingChannelsPersonalisedRecommendationAction is { HasIsUserOptedOut: true } chRec)
+            {
+                await _emitEventAsync(new ChannelsPersonalisedRecUpdatedEvent(chRec.IsUserOptedOut, ts)).ConfigureAwait(false);
+            }
+
+            if (av.PinAction is { HasPinned: true } pin && mutation.Index.Count >= 2)
+            {
+                await _emitEventAsync(new PinUpdatedEvent(mutation.Index[1], pin.Pinned, ts)).ConfigureAwait(false);
+            }
+
+            if (av.MuteAction is { HasMuted: true } mute && mutation.Index.Count >= 2)
+            {
+                long? endTs = mute.HasMuteEndTimestamp ? mute.MuteEndTimestamp : null;
+                await _emitEventAsync(new MuteUpdatedEvent(mutation.Index[1], mute.Muted, endTs, ts)).ConfigureAwait(false);
+            }
+
+            if (av.ArchiveChatAction is { HasArchived: true } arc && mutation.Index.Count >= 2)
+            {
+                await _emitEventAsync(new ArchiveUpdatedEvent(mutation.Index[1], arc.Archived, ts)).ConfigureAwait(false);
+            }
+
+            if (av.MarkChatAsReadAction is { HasRead: true } mcr && mutation.Index.Count >= 2)
+            {
+                await _emitEventAsync(new MarkChatAsReadUpdatedEvent(mutation.Index[1], mcr.Read, ts)).ConfigureAwait(false);
+            }
+
+            if (av.LockChatAction is { HasLocked: true } lck && mutation.Index.Count >= 2)
+            {
+                await _emitEventAsync(new LockChatUpdatedEvent(mutation.Index[1], lck.Locked, ts)).ConfigureAwait(false);
+            }
+
+            if (av.StarAction is { HasStarred: true } star && mutation.Index.Count >= 4)
+            {
+                bool fromMe = string.Equals(mutation.Index[3], "1", StringComparison.Ordinal);
+                await _emitEventAsync(new StarUpdatedEvent(mutation.Index[1], mutation.Index[2], fromMe, star.Starred, ts)).ConfigureAwait(false);
+            }
+
+            if (av.DeleteMessageForMeAction is { } dmfm && mutation.Index.Count >= 4)
+            {
+                bool fromMe = string.Equals(mutation.Index[3], "1", StringComparison.Ordinal);
+                await _emitEventAsync(new DeleteMessageForMeUpdatedEvent(
+                    mutation.Index[1],
+                    mutation.Index[2],
+                    fromMe,
+                    dmfm.HasDeleteMedia && dmfm.DeleteMedia,
+                    ts)).ConfigureAwait(false);
+            }
+
+            if (av.ClearChatAction is not null && mutation.Index.Count >= 4 && mutation.Index[0] == "clearChat")
+            {
+                bool delStarred = string.Equals(mutation.Index[2], "1", StringComparison.Ordinal);
+                bool delMedia = string.Equals(mutation.Index[3], "1", StringComparison.Ordinal);
+                await _emitEventAsync(new ClearChatUpdatedEvent(mutation.Index[1], delStarred, delMedia, ts)).ConfigureAwait(false);
+            }
+
+            if (av.DeleteChatAction is not null && mutation.Index.Count >= 3 && mutation.Index[0] == "deleteChat")
+            {
+                bool delMedia = string.Equals(mutation.Index[2], "1", StringComparison.Ordinal);
+                await _emitEventAsync(new DeleteChatUpdatedEvent(mutation.Index[1], delMedia, ts)).ConfigureAwait(false);
+            }
+
+            if (av.FavoritesAction is { } favs)
+            {
+                string[] ids = favs.Favorites
+                    .Where(f => f.HasId && !string.IsNullOrEmpty(f.Id))
+                    .Select(f => f.Id)
+                    .ToArray();
+                await _emitEventAsync(new FavoritesUpdatedEvent(ids, ts)).ConfigureAwait(false);
+            }
+
+            if (av.ContactAction is { } contact && mutation.Index.Count >= 2)
+            {
+                await _emitEventAsync(new ContactUpdatedEvent(
+                    mutation.Index[1],
+                    IsLid: false,
+                    contact.HasFullName ? contact.FullName : null,
+                    contact.HasFirstName ? contact.FirstName : null,
+                    contact.HasUsername ? contact.Username : null,
+                    ts)).ConfigureAwait(false);
+            }
+
+            if (av.LidContactAction is { } lidContact && mutation.Index.Count >= 2)
+            {
+                await _emitEventAsync(new ContactUpdatedEvent(
+                    mutation.Index[1],
+                    IsLid: true,
+                    lidContact.HasFullName ? lidContact.FullName : null,
+                    lidContact.HasFirstName ? lidContact.FirstName : null,
+                    lidContact.HasUsername ? lidContact.Username : null,
+                    ts)).ConfigureAwait(false);
+            }
+
+            if (av.StickerAction is { HasIsFavorite: true } stk && mutation.Index.Count >= 2)
+            {
+                await _emitEventAsync(new FavoriteStickerUpdatedEvent(
+                    mutation.Index[1],
+                    stk.IsFavorite,
+                    stk.HasDirectPath ? stk.DirectPath : null,
+                    stk.HasMimetype ? stk.Mimetype : null,
+                    ts)).ConfigureAwait(false);
+            }
+
+            if (mutation.Index.Count >= 2 && mutation.Index[0] == "removeRecentSticker")
+            {
+                long? lastSent = av.RemoveRecentStickerAction?.HasLastStickerSentTs == true
+                    ? av.RemoveRecentStickerAction.LastStickerSentTs
+                    : null;
+                await _emitEventAsync(new RemoveRecentStickerUpdatedEvent(mutation.Index[1], lastSent, ts)).ConfigureAwait(false);
             }
         }
 

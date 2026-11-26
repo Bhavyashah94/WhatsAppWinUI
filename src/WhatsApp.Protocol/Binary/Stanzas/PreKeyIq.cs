@@ -114,6 +114,27 @@ public static class PreKeyIq
             signedPreKeyNode);
     }
 
+    public static Node BuildRotateSignedPreKey(
+        string iqId,
+        uint signedPreKeyId,
+        ReadOnlySpan<byte> signedPreKeyPublic,
+        ReadOnlySpan<byte> signedPreKeySignature)
+    {
+        if (signedPreKeyPublic.Length != 32)
+            throw new ArgumentException("Signed pre-key public key must be 32 bytes.", nameof(signedPreKeyPublic));
+        if (signedPreKeySignature.Length != 64)
+            throw new ArgumentException("Signed pre-key signature must be 64 bytes.", nameof(signedPreKeySignature));
+
+        var signedPreKeyNode = new Node("skey", new Node[]
+        {
+            new("id", StanzaBuilder.EncodeKeyId24(signedPreKeyId)),
+            new("value", signedPreKeyPublic.ToArray()),
+            new("signature", signedPreKeySignature.ToArray())
+        });
+
+        return StanzaBuilder.Iq(iqId, "set", Xmlns, StanzaBuilder.ServerPn, new Node("rotate", new[] { signedPreKeyNode }));
+    }
+
     public static PreKeyFetchOutcome ParsePreKeysResponse(
         Node responseIq,
         IReadOnlyDictionary<string, byte[]>? accountIdentities = null)
