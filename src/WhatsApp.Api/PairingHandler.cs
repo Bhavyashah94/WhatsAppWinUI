@@ -152,7 +152,7 @@ public sealed class PairingHandler : IAsyncDisposable
             KeyPair ephemeral = Curve25519.GenerateKeyPair();
             byte[] wrappedEph = PairCodeCrypto.EncryptEphemeralPublicKey(ephemeral.PublicKey, code);
             var (platformId, display) = PairCodeCrypto.ResolveCompanionPlatform(
-                null,
+                WhatsApp.WaProto.ClientPayloadFactory.CreateDefaultDeviceProps(),
                 options.PlatformId,
                 options.DisplayOs);
 
@@ -492,8 +492,20 @@ public sealed class PairingHandler : IAsyncDisposable
 
             if (!token.IsCancellationRequested)
             {
+                bool pairCodeOutstanding;
+                await _pairLock.WaitAsync(token).ConfigureAwait(false);
+                try
+                {
+                    DateTimeOffset now = _options.TimeProvider.GetUtcNow();
+                    pairCodeOutstanding = _pairCodeState is { Completed: false } state && now <= state.ExpiresAtUtc;
+                }
+                finally
+                {
+                    _pairLock.Release();
+                }
+
                 await _emitEventAsync(new PairQrExhaustedEvent()).ConfigureAwait(false);
-                if (_onQrCodesExhaustedAsync is not null)
+                if (!pairCodeOutstanding && _onQrCodesExhaustedAsync is not null)
                 {
                     await _onQrCodesExhaustedAsync(token).ConfigureAwait(false);
                 }

@@ -79,6 +79,24 @@ internal sealed class SqliteHistoryStore : IMessageHistoryStore
         }, ct));
     }
 
+    public ValueTask<int> GetMessageCountAsync(string? chatJid = null, CancellationToken ct = default)
+    {
+        return new(_runner.RunReadAsync(async (conn, token) =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = string.IsNullOrWhiteSpace(chatJid)
+                ? "SELECT COUNT(*) FROM messages WHERE device_id = $deviceId;"
+                : "SELECT COUNT(*) FROM messages WHERE device_id = $deviceId AND chat_jid = $chatJid;";
+            cmd.Parameters.AddWithValue("$deviceId", _deviceId);
+            if (!string.IsNullOrWhiteSpace(chatJid))
+            {
+                cmd.Parameters.AddWithValue("$chatJid", chatJid);
+            }
+            object? scalar = await cmd.ExecuteScalarAsync(token).ConfigureAwait(false);
+            return scalar is long l ? checked((int)l) : 0;
+        }, ct));
+    }
+
     public ValueTask<IReadOnlyList<MessageRecord>> GetMessagesAsync(
         string chatJid,
         ulong? beforeTimestamp,
@@ -599,10 +617,19 @@ internal sealed class SqliteHistoryStore : IMessageHistoryStore
                 continue;
             }
 
+            ulong effectiveLastTs = conv.LastMsgTimestamp;
+            foreach (var msg in conv.Messages)
+            {
+                if (!string.IsNullOrWhiteSpace(msg.Id) && msg.Timestamp > effectiveLastTs)
+                {
+                    effectiveLastTs = msg.Timestamp;
+                }
+            }
+
             idParam.Value = conv.Id;
             nameParam.Value = (object?)conv.Name ?? DBNull.Value;
             unreadParam.Value = unchecked((long)conv.UnreadCount);
-            lastTsParam.Value = unchecked((long)conv.LastMsgTimestamp);
+            lastTsParam.Value = unchecked((long)effectiveLastTs);
             archivedParam.Value = conv.Archived ? 1 : 0;
             await chatCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 

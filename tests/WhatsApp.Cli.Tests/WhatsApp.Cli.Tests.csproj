@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="MSTest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\apps\WhatsApp.Cli\WhatsApp.Cli.csproj" />
+    <ProjectReference Include="..\..\src\WhatsApp.Api\WhatsApp.Api.csproj" />
+    <ProjectReference Include="..\..\src\WhatsApp.Protocol\WhatsApp.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\WhatsApp.Storage.Sqlite\WhatsApp.Storage.Sqlite.csproj" />
+  </ItemGroup>
+</Project>

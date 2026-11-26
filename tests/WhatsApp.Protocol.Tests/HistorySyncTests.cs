@@ -217,4 +217,65 @@ public sealed class HistorySyncTests
         Assert.AreEqual(1, batch.Pushnames.Count);
         Assert.AreEqual("Alice", batch.Pushnames[0].Pushname);
     }
+
+    [TestMethod]
+    public void HistorySyncDecoder_Decodes_Stubs_RichMessages_Quotes_And_MaxTimestamp()
+    {
+        var sync = new PbHistorySync { SyncType = PbHistorySyncType.InitialBootstrap };
+        var conv = new global::Whatsapp.Conversation
+        {
+            Id = "120363000000000001@g.us"
+        };
+        conv.Messages.Add(new global::Whatsapp.HistorySyncMsg
+        {
+            Message = new global::Whatsapp.WebMessageInfo
+            {
+                Key = new global::Whatsapp.MessageKey { RemoteJid = conv.Id, Id = "STUB-1", FromMe = false },
+                MessageTimestamp = 1700000100,
+                MessageStubType = global::Whatsapp.WebMessageInfo.Types.StubType.GroupCreate,
+            }
+        });
+        conv.Messages.Add(new global::Whatsapp.HistorySyncMsg
+        {
+            Message = new global::Whatsapp.WebMessageInfo
+            {
+                Key = new global::Whatsapp.MessageKey { RemoteJid = conv.Id, Id = "POLL-1", FromMe = true, Participant = "100000000000201@lid" },
+                MessageTimestamp = 1700000250,
+                Message = new global::Whatsapp.Message
+                {
+                    ViewOnceMessageV2Extension = new global::Whatsapp.Message.Types.FutureProofMessage
+                    {
+                        Message = new global::Whatsapp.Message
+                        {
+                            PollCreationMessageV3 = new global::Whatsapp.Message.Types.PollCreationMessage
+                            {
+                                Name = "Lunch spot?",
+                                ContextInfo = new global::Whatsapp.ContextInfo
+                                {
+                                    StanzaId = "ORIG-9",
+                                    Participant = "100000000000202@lid",
+                                    QuotedMessage = new global::Whatsapp.Message { Conversation = "Where to eat?" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        sync.Conversations.Add(conv);
+
+        HistorySyncBatch batch = HistorySyncDecoder.Decode(sync.ToByteArray());
+        Assert.AreEqual(1, batch.Conversations.Count);
+        ConversationRecord c = batch.Conversations[0];
+        Assert.AreEqual(1700000250UL, c.LastMsgTimestamp);
+        Assert.AreEqual(2, c.Messages.Count);
+
+        Assert.AreEqual(MessageType.Protocol, c.Messages[0].Type);
+        Assert.IsTrue(c.Messages[0].Text?.Contains("GroupCreate", StringComparison.Ordinal) == true);
+
+        Assert.AreEqual(MessageType.Text, c.Messages[1].Type);
+        Assert.AreEqual("[Poll] Lunch spot?", c.Messages[1].Text);
+        Assert.AreEqual("ORIG-9", c.Messages[1].QuotedMessageId);
+        Assert.AreEqual("Where to eat?", c.Messages[1].QuotedText);
+    }
 }

@@ -346,7 +346,42 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             var usync = new UsyncClient(iqClient, _backend, _lidPnCache, _options.TimeProvider);
             var preKeyFetcher = new PreKeyFetchClient(iqClient, _backend, _lidPnCache, credentials);
             var retryCoordinator = new RetryCoordinator(socket, _backend, preKeyFetcher, _lidPnCache, credentials, EmitEventAsync);
-            var messageReceiver = new MessageReceiver(socket, _backend, _lidPnCache, credentials, retryCoordinator, EmitEventAsync, _options.TimeProvider, historySync, mediaTransfer);
+            Func<CancellationToken, Task>? onAppStateKeysSaved = syncd is not null && _options.AutoSyncAppState
+                ? _token =>
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await syncd.SyncCollectionsAsync(
+                                [
+                                    AppStateCollections.CriticalBlock,
+                                    AppStateCollections.CriticalUnblockLow,
+                                    AppStateCollections.RegularHigh,
+                                    AppStateCollections.Regular,
+                                    AppStateCollections.RegularLow
+                                ],
+                                ct: sessionStopCts.Token).ConfigureAwait(false);
+                        }
+                        catch
+                        {
+                            // Syncd retries on next account_sync dirty bit or reconnect.
+                        }
+                    });
+                    return Task.CompletedTask;
+                }
+                : null;
+            var messageReceiver = new MessageReceiver(
+                socket,
+                _backend,
+                _lidPnCache,
+                credentials,
+                retryCoordinator,
+                EmitEventAsync,
+                _options.TimeProvider,
+                historySync,
+                mediaTransfer,
+                onAppStateKeysSaved);
             var messageSender = new MessageSender(socket, usync, preKeyFetcher, _backend, _lidPnCache, credentials, retryCoordinator, _options.TimeProvider);
             var presenceClient = new PresenceClient(socket, _backend, credentials, EmitEventAsync);
             var pdoHistory = new PdoHistoryClient(_backend, messageSender, credentials);

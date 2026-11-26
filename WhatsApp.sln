@@ -31,6 +31,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WhatsApp.Calling", "src\Wha
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WhatsApp.Calling.Tests", "tests\WhatsApp.Calling.Tests\WhatsApp.Calling.Tests.csproj", "{E52305D6-4D8F-4850-A048-7B8B7F3090EA}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WhatsApp.Cli.Tests", "tests\WhatsApp.Cli.Tests\WhatsApp.Cli.Tests.csproj", "{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -173,6 +175,18 @@ Global
 		{E52305D6-4D8F-4850-A048-7B8B7F3090EA}.Release|x64.Build.0 = Release|Any CPU
 		{E52305D6-4D8F-4850-A048-7B8B7F3090EA}.Release|x86.ActiveCfg = Release|Any CPU
 		{E52305D6-4D8F-4850-A048-7B8B7F3090EA}.Release|x86.Build.0 = Release|Any CPU
+		{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358}.Debug|x64.Build.0 = Debug|Any CPU
+		{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358}.Debug|x86.Build.0 = Debug|Any CPU
+		{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358}.Release|x64.ActiveCfg = Release|Any CPU
+		{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358}.Release|x64.Build.0 = Release|Any CPU
+		{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358}.Release|x86.ActiveCfg = Release|Any CPU
+		{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -189,5 +203,6 @@ Global
 		{86EFC33A-0AF3-4FA5-87C6-73A173C04947} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{3399899E-13D7-426E-BA9B-5D20B94E567D} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{E52305D6-4D8F-4850-A048-7B8B7F3090EA} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{4BB4F536-8626-4B7B-B84A-C6BBFEE2B358} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal

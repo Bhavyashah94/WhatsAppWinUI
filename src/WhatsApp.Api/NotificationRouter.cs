@@ -224,7 +224,7 @@ public sealed class NotificationRouter
                     }
                     try
                     {
-                        await PreKeyUploader.EnsureUploadedAsync(_iqClient, _backend, _credentials, force: true, ct: sessionToken)
+                        await PreKeyUploader.EnsureUploadedAsync(_iqClient, _backend, _credentials, force: false, ct: sessionToken)
                             .ConfigureAwait(false);
                     }
                     catch

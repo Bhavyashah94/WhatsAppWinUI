@@ -26,6 +26,7 @@ public sealed class MessageReceiver
     private readonly RetryCoordinator _retryCoordinator;
     private readonly HistorySyncCoordinator? _historySync;
     private readonly MediaTransferClient? _mediaTransfer;
+    private readonly Func<CancellationToken, Task>? _onAppStateKeysSaved;
     private readonly Func<WhatsAppEvent, ValueTask> _emitEvent;
     private readonly TimeProvider _timeProvider;
 
@@ -38,7 +39,8 @@ public sealed class MessageReceiver
         Func<WhatsAppEvent, ValueTask> emitEvent,
         TimeProvider? timeProvider = null,
         HistorySyncCoordinator? historySync = null,
-        MediaTransferClient? mediaTransfer = null)
+        MediaTransferClient? mediaTransfer = null,
+        Func<CancellationToken, Task>? onAppStateKeysSaved = null)
     {
         _socket = socket ?? throw new ArgumentNullException(nameof(socket));
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
@@ -47,6 +49,7 @@ public sealed class MessageReceiver
         _retryCoordinator = retryCoordinator ?? throw new ArgumentNullException(nameof(retryCoordinator));
         _historySync = historySync;
         _mediaTransfer = mediaTransfer;
+        _onAppStateKeysSaved = onAppStateKeysSaved;
         _emitEvent = emitEvent ?? throw new ArgumentNullException(nameof(emitEvent));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -90,9 +93,9 @@ public sealed class MessageReceiver
 
         foreach (EncryptedMessagePayload enc in ordered)
         {
+            Message message;
             try
             {
-                Message message;
                 if (string.Equals(enc.EncType, "msmsg", StringComparison.Ordinal))
                 {
                     // Bot msmsg envelopes are AES-256-GCM over unpadded protobuf Message bytes (no PKCS7 padding).
@@ -104,34 +107,35 @@ public sealed class MessageReceiver
                     byte[] padded = await DecryptEncPayloadAsync(enc, chatBare, senderDev, senderAddr, ct).ConfigureAwait(false);
                     message = MessageFraming.DecodeAndUnpadMessage(padded);
                 }
-
-                bool fromMe = IsOwnUser(senderDev.User);
-                string effectiveChat = chatBare;
-
-                if (message.DeviceSentMessage is { } dsm)
-                {
-                    if (!string.IsNullOrEmpty(dsm.DestinationJid) && Jid.TryParse(dsm.DestinationJid, out Jid destJid))
-                    {
-                        effectiveChat = destJid.ToNonAdString();
-                    }
-                    fromMe = true;
-                    if (dsm.Message is { } inner)
-                    {
-                        message = inner;
-                    }
-                }
-
-                await ProcessSideEffectsAndPersistAsync(parsed, message, effectiveChat, senderDev.ToNonAdString(), fromMe, ct)
-                    .ConfigureAwait(false);
-
-                _retryCoordinator.ClearInboundRetry(effectiveChat, parsed.Id);
-                anySaved = true;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 lastFailure = ex;
                 failedEnc = enc;
+                continue;
             }
+
+            bool fromMe = IsOwnUser(senderDev.User);
+            string effectiveChat = chatBare;
+
+            if (message.DeviceSentMessage is { } dsm)
+            {
+                if (!string.IsNullOrEmpty(dsm.DestinationJid) && Jid.TryParse(dsm.DestinationJid, out Jid destJid))
+                {
+                    effectiveChat = destJid.ToNonAdString();
+                }
+                fromMe = true;
+                if (dsm.Message is { } inner)
+                {
+                    message = inner;
+                }
+            }
+
+            await ProcessSideEffectsAndPersistAsync(parsed, message, effectiveChat, senderDev.ToNonAdString(), fromMe, ct)
+                .ConfigureAwait(false);
+
+            _retryCoordinator.ClearInboundRetry(effectiveChat, parsed.Id);
+            anySaved = true;
         }
 
         if (anySaved)
@@ -699,7 +703,59 @@ public sealed class MessageReceiver
             }
             else if (pm.Type == Message.Types.ProtocolMessage.Types.Type.HistorySyncNotification && pm.HistorySyncNotification is { } hsn && _historySync is not null)
             {
-                await _historySync.ProcessNotificationAsync(hsn, ct).ConfigureAwait(false);
+                // Send hist_sync receipt before CDN download/decompression (matching whatsapp-rust without capture hooks)
+                // so the primary phone advances chunk progress smoothly without waiting on large downloads.
+                await _socket.SendNodeAsync(
+                    ReceiptStanza.Build(parsed.Id, parsed.From.ToNonAd(), ReceiptStanza.TypeHistSync),
+                    ct).ConfigureAwait(false);
+                try
+                {
+                    await _historySync.ProcessNotificationAsync(hsn, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // History CDN fetch failure must not poison Signal ratchet or suppress stanza ack.
+                    await _emitEvent(new DecryptionFailureEvent(
+                        parsed.Id,
+                        chatBare,
+                        senderBare,
+                        "HistorySyncDownloadError",
+                        RetryCount: 0,
+                        SentRetryReceipt: false,
+                        Detail: $"{ex.GetType().Name}: {ex.Message}")).ConfigureAwait(false);
+                }
+            }
+            else if (pm.Type == Message.Types.ProtocolMessage.Types.Type.AppStateSyncKeyShare
+                && pm.AppStateSyncKeyShare is { } keyShare
+                && AppStateKeyShareHelper.IsSelfSender(parsed.SenderDeviceJid, _credentials))
+            {
+                int savedKeys = await AppStateKeyShareHelper.SaveKeyShareAsync(keyShare, _backend.AppSync, ct).ConfigureAwait(false);
+                await _socket.SendNodeAsync(
+                    ReceiptStanza.Build(parsed.Id, parsed.From.ToNonAd(), ReceiptStanza.TypePeerMsg),
+                    ct).ConfigureAwait(false);
+                if (savedKeys > 0)
+                {
+                    await _emitEvent(new MessageAddOnEvent(
+                        "app_state_sync_key_share",
+                        chatBare,
+                        senderBare,
+                        parsed.Id,
+                        $"saved_keys={savedKeys}",
+                        BoolFlag: true,
+                        parsed.TimestampSeconds)).ConfigureAwait(false);
+
+                    if (_onAppStateKeysSaved is not null)
+                    {
+                        try
+                        {
+                            await _onAppStateKeysSaved(ct).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            // Syncd retries on next account_sync dirty bit or reconnect.
+                        }
+                    }
+                }
             }
             else if (pm.Type == Message.Types.ProtocolMessage.Types.Type.DraftMessageSync && pm.DraftMessageSync is { } dms)
             {
@@ -967,7 +1023,8 @@ public sealed class MessageReceiver
             parsed.SenderDeviceJid.ToNonAdString(),
             reason.ToString(),
             retryCount,
-            shouldSend)).ConfigureAwait(false);
+            shouldSend,
+            $"{ex.GetType().Name}: {ex.Message}")).ConfigureAwait(false);
     }
 
     private async Task SendAckOrDeliveryReceiptAsync(IncomingMessageStanza parsed, bool hideDelivery, CancellationToken ct)

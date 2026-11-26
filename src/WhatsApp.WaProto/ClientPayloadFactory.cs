@@ -14,7 +14,7 @@ public static class ClientPayloadFactory
     {
         Primary = 2,
         Secondary = 3000,
-        Tertiary = 1054751086
+        Tertiary = 1056346120
     };
 
     public static ClientPayload.Types.UserAgent CreateDefaultUserAgent() => new()
@@ -32,6 +32,37 @@ public static class ClientPayloadFactory
         LocaleCountryIso31661Alpha2 = "US"
     };
 
+    public static DeviceProps.Types.HistorySyncConfig CreateDefaultHistorySyncConfig() => new()
+    {
+        StorageQuotaMb = 10240,
+        InlineInitialPayloadInE2EeMsg = true,
+        RecentSyncDaysLimit = 90,
+        SupportCallLogHistory = true,
+        SupportBotUserAgentChatHistory = true,
+        SupportCagReactionsAndPolls = true,
+        SupportBizHostedMsg = true,
+        SupportRecentSyncChunkMessageCountTuning = true,
+        SupportHostedGroupMsg = true,
+        SupportFbidBotChatHistory = true,
+        SupportAddOnHistorySyncMigration = true,
+        SupportMessageAssociation = true,
+        SupportGroupHistory = true,
+        OnDemandReady = true,
+        CompleteOnDemandReady = true,
+        SupportInlineContacts = true,
+        SupportNewsletter = true,
+        SupportOmittedConversationMetadata = true,
+        SupportDraftSync = true
+    };
+
+    public static DeviceProps CreateDefaultDeviceProps() => new()
+    {
+        Os = "Windows",
+        PlatformType = DeviceProps.Types.PlatformType.Chrome,
+        RequireFullSync = false,
+        HistorySyncConfig = CreateDefaultHistorySyncConfig()
+    };
+
     public static byte[] BuildRegistrationPayload(
         uint registrationId,
         byte[] identityPublicKey,
@@ -45,12 +76,7 @@ public static class ClientPayloadFactory
         string versionStr = $"{userAgent.AppVersion.Primary}.{userAgent.AppVersion.Secondary}.{userAgent.AppVersion.Tertiary}";
         byte[] buildHash = MD5.HashData(Encoding.UTF8.GetBytes(versionStr));
 
-        deviceProps ??= new DeviceProps
-        {
-            Os = "Windows",
-            PlatformType = DeviceProps.Types.PlatformType.Chrome,
-            RequireFullSync = false
-        };
+        deviceProps ??= CreateDefaultDeviceProps();
 
         byte[] regIdBytes = [
             (byte)(registrationId >> 24),
@@ -102,7 +128,8 @@ public static class ClientPayloadFactory
     public static byte[] BuildLoginPayload(
         ulong username,
         uint deviceId,
-        int loginCounter = 0)
+        int loginCounter = 0,
+        bool lidDbMigrated = false)
     {
         var payload = new ClientPayload
         {
@@ -113,7 +140,7 @@ public static class ClientPayloadFactory
             ConnectType = ClientPayload.Types.ConnectType.WifiUnknown,
             ConnectReason = ClientPayload.Types.ConnectReason.UserActivated,
             Lc = loginCounter,
-            LidDbMigrated = false,
+            LidDbMigrated = lidDbMigrated,
             UserAgent = CreateDefaultUserAgent(),
             WebInfo = new ClientPayload.Types.WebInfo
             {

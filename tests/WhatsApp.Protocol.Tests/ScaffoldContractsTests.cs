@@ -59,6 +59,12 @@ public sealed class ScaffoldContractsTests
         Assert.IsFalse(parsedReg.Pull);
         Assert.AreEqual("Test Device", parsedReg.PushName);
         Assert.IsNotNull(parsedReg.DevicePairingData);
+        var parsedProps = global::Whatsapp.DeviceProps.Parser.ParseFrom(parsedReg.DevicePairingData.DeviceProps);
+        Assert.IsNotNull(parsedProps.HistorySyncConfig);
+        Assert.IsTrue(parsedProps.HistorySyncConfig.SupportCagReactionsAndPolls);
+        Assert.IsTrue(parsedProps.HistorySyncConfig.SupportDraftSync);
+        Assert.IsFalse(parsedProps.HistorySyncConfig.HasFullSyncDaysLimit);
+        Assert.AreEqual(90u, parsedProps.HistorySyncConfig.RecentSyncDaysLimit);
 
         byte[] loginBytes = ClientPayloadFactory.BuildLoginPayload(15550101002UL, deviceId: 12);
         var parsedLogin = PbClientPayload.Parser.ParseFrom(loginBytes);

@@ -220,7 +220,7 @@ public static class NoiseHandshakeRunner
             {
                 throw new InvalidDataException($"Registered PN user '{pn.User}' is not a valid numeric WhatsApp ID.");
             }
-            return ClientPayloadFactory.BuildLoginPayload(username, pn.Device);
+            return ClientPayloadFactory.BuildLoginPayload(username, pn.Device, lidDbMigrated: credentials.LidMigrated);
         }
 
         return ClientPayloadFactory.BuildRegistrationPayload(

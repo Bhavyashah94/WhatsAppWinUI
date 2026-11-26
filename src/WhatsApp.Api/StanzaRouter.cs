@@ -1,3 +1,4 @@
+using System.Threading.Channels;
 using WhatsApp.Protocol.Binary;
 
 namespace WhatsApp.Api;
@@ -33,8 +34,15 @@ public sealed class StanzaRouter : IAsyncDisposable
     private readonly NoiseSessionSocket _socket;
     private readonly IqClient _iqClient;
     private readonly StanzaHandlers _handlers;
+    private readonly Channel<Node> _trafficQueue = Channel.CreateUnbounded<Node>(new UnboundedChannelOptions
+    {
+        SingleReader = true,
+        SingleWriter = true
+    });
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _pumpTask;
+    private readonly Task _workerTask;
+    private Exception? _workerFault;
     private int _disposed;
 
     public StanzaRouter(NoiseSessionSocket socket, IqClient iqClient, StanzaHandlers? handlers = null)
@@ -43,6 +51,7 @@ public sealed class StanzaRouter : IAsyncDisposable
         _iqClient = iqClient ?? throw new ArgumentNullException(nameof(iqClient));
         _handlers = handlers ?? new StanzaHandlers();
 
+        _workerTask = Task.Run(WorkerLoopAsync);
         _pumpTask = Task.Run(PumpLoopAsync);
     }
 
@@ -56,7 +65,32 @@ public sealed class StanzaRouter : IAsyncDisposable
         {
             await foreach (Node node in _socket.InboundNodes.ReadAllAsync(_cts.Token).ConfigureAwait(false))
             {
-                await DispatchAsync(node, _cts.Token).ConfigureAwait(false);
+                // Resolve IQ responses, message/call acks, and stream-level fatal stanzas on the read lane
+                // so a sequential handler awaiting SendIqAsync or SendMessageAsync cannot self-deadlock the router.
+                if (string.Equals(node.Tag, "iq", StringComparison.Ordinal) && _iqClient.TryResolve(node))
+                {
+                    continue;
+                }
+
+                if (string.Equals(node.Tag, "ack", StringComparison.Ordinal) && _handlers.OnAck is { } onAck)
+                {
+                    await onAck(node, _cts.Token).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (string.Equals(node.Tag, "stream:error", StringComparison.Ordinal) && _handlers.OnStreamError is { } onStreamError)
+                {
+                    await onStreamError(node, _cts.Token).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (string.Equals(node.Tag, "failure", StringComparison.Ordinal) && _handlers.OnFailure is { } onFailure)
+                {
+                    await onFailure(node, _cts.Token).ConfigureAwait(false);
+                    continue;
+                }
+
+                await _trafficQueue.Writer.WriteAsync(node, _cts.Token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (_cts.IsCancellationRequested)
@@ -69,8 +103,41 @@ public sealed class StanzaRouter : IAsyncDisposable
         }
         finally
         {
+            _trafficQueue.Writer.TryComplete();
+            try
+            {
+                await _workerTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+            {
+            }
+            catch (Exception wex)
+            {
+                fault ??= wex;
+            }
+            fault ??= Volatile.Read(ref _workerFault);
             _iqClient.CancelAll(fault ?? new OperationCanceledException($"StanzaRouter generation {Generation} closed."));
             _handlers.OnClosed?.Invoke(Generation, fault);
+        }
+    }
+
+    private async Task WorkerLoopAsync()
+    {
+        try
+        {
+            await foreach (Node node in _trafficQueue.Reader.ReadAllAsync(_cts.Token).ConfigureAwait(false))
+            {
+                await DispatchAsync(node, _cts.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            Interlocked.CompareExchange(ref _workerFault, ex, null);
+            _trafficQueue.Writer.TryComplete();
+        _cts.Cancel();
         }
     }
 
@@ -192,6 +259,7 @@ public sealed class StanzaRouter : IAsyncDisposable
             return;
         }
 
+        _trafficQueue.Writer.TryComplete();
         _cts.Cancel();
         try
         {

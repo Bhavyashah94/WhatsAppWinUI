@@ -50,6 +50,8 @@ public static class ReceiptStanza
     public const string TypePlayed = "played";
     public const string TypePlayedSelf = "played-self";
     public const string TypeRetry = "retry";
+    public const string TypeHistSync = "hist_sync";
+    public const string TypePeerMsg = "peer_msg";
 
     /// <summary>
     /// Builds a single or aggregated <c>&lt;receipt&gt;</c> stanza. Pass <paramref name="type"/> = <c>null</c>

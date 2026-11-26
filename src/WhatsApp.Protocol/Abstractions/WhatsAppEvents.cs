@@ -110,7 +110,8 @@ public sealed record DecryptionFailureEvent(
     string SenderJid,
     string Reason,
     int RetryCount,
-    bool SentRetryReceipt) : WhatsAppEvent;
+    bool SentRetryReceipt,
+    string? Detail = null) : WhatsAppEvent;
 
 public sealed record MessageRetrySentEvent(
     string MessageId,

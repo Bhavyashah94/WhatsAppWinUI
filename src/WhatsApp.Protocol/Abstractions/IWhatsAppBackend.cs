@@ -113,6 +113,7 @@ public interface IMessageHistoryStore
     ValueTask UpsertBatchAsync(HistorySyncBatch batch, CancellationToken ct = default);
     ValueTask SaveMessageAsync(MessageRecord message, CancellationToken ct = default);
     ValueTask<IReadOnlyList<MessageRecord>> GetMessagesAsync(string chatJid, ulong? beforeTimestamp, int limit, CancellationToken ct = default);
+    ValueTask<int> GetMessageCountAsync(string? chatJid = null, CancellationToken ct = default);
     ValueTask<ActiveMessageRange?> GetMessageRangeAsync(string chatJid, CancellationToken ct = default);
     ValueTask UpdateMessageRangeAsync(ActiveMessageRange range, CancellationToken ct = default);
 

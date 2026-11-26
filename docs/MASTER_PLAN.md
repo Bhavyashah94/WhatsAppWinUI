@@ -148,11 +148,9 @@ src/WhatsApp.Api          src/WhatsApp.Storage.Sqlite   src/WhatsApp.Transport
 
 ### Phase 11 — End-to-End Headless Verification Harness (`apps/WhatsApp.Cli`)
 * Prove all core & advanced headless CLI flows live against WhatsApp servers before writing any XAML/WinUI 3 UI:
-  1. Single-attempt QR & Phone-Code pairing + `AppStateSyncKeyShare` + initial bootstrap `HistorySync`.
-  2. Clean disconnect + cold-boot Noise IK reconnect (offline drain + `syncd` + `<notification>` sync).
-  3. Live 1:1, group, rich add-ons (reactions/edits/polls/events/comments), media upload/download + reupload recovery, and FTS5 history queries.
-  4. On-demand PDO (`syncType = 6`) historical backfill.
-  5. Account/Privacy/Profile/ChatActions + Community/Newsletter/Status/Business actions + live VoIP call setup/teardown.
+  * **Phase 11A ✅ — Core Host, QR/Phone Pairing, SQLite Profile & Reconnect:** `QRCoder` terminal Unicode half-block renderer + secret redaction, `CliRuntime`, dual-mode REPL/single-shot `CommandDispatcher` (`status`, `pair qr`, `pair phone`, `connect`, `disconnect`, `reconnect`, `wait-sync`, `events`, `reset-pairing`), plus unit/loopback suite (`WhatsApp.Cli.Tests`) and live Noise XX `pair-device` handshake check.
+  * **Phase 11B — Messaging, Media, FTS5 History, PDO Backfill, Contacts & Groups CLI:** 1:1 & group text, replies, reactions, edits, deletes, polls, events, comments, media upload/download/reupload recovery, FTS5 search/history, on-demand PDO (`syncType = 6`), presence, receipts, and full group lifecycle.
+  * **Phase 11C — Account, Privacy, Syncd Mutations, Communities, Newsletters, Status, Business & VoIP Call CLI:** Syncd pin/mute/archive/star/disappearing/block actions, profile/privacy/disappearing defaults, communities, newsletters, status updates, business profile/catalog, live VoIP 1:1/group call setup & teardown, and a repeatable live verification checklist.
 
 ### Phase 12 — WinUI 3 Desktop Client (`apps/WhatsApp.Desktop`)
 * Native Windows 11 WinUI 3 client consuming `WhatsApp.Api` commands and `WhatsAppEvent` channels strictly over the clean UI boundary:

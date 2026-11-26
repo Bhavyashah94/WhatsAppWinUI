@@ -80,5 +80,39 @@ public sealed class Phase8EStorageTests
         IReadOnlyList<ContactRecord> foundContacts = await backend.History.SearchContactsAsync("Alice");
         Assert.AreEqual(1, foundContacts.Count);
         Assert.AreEqual("Alice Johnson", foundContacts[0].Name);
+        Assert.AreEqual(2, await backend.History.GetMessageCountAsync());
+        Assert.AreEqual(1, await backend.History.GetMessageCountAsync("100000000000001@lid"));
+    }
+
+    [TestMethod]
+    public async Task UpsertBatchAsync_Backfills_ChatLastMsgTimestamp_From_Messages_When_ConversationTs_Zero()
+    {
+        await using var backend = new SqliteBackend(":memory:");
+        await backend.InitializeAsync();
+
+        await backend.History.UpsertBatchAsync(new HistorySyncBatch(
+            Whatsapp.HistorySync.Types.HistorySyncType.InitialBootstrap,
+            ChunkOrder: 0,
+            Progress: 100,
+            LidMappings: [],
+            Pushnames: [],
+            InlineContacts: [],
+            Conversations:
+            [
+                new ConversationRecord(
+                    "100000000000055@lid",
+                    "Test Chat",
+                    UnreadCount: 0,
+                    LastMsgTimestamp: 0,
+                    Archived: false,
+                    Messages:
+                    [
+                        new MessageRecord("HM-1", "100000000000055@lid", "100000000000055@lid", false, 1700000900, MessageType.Text, "hi")
+                    ])
+            ]));
+
+        ChatSummary chat = (await backend.History.GetChatsAsync()).Single();
+        Assert.AreEqual(1700000900UL, chat.LastMsgTimestamp);
+        Assert.AreEqual(1, await backend.History.GetMessageCountAsync());
     }
 }

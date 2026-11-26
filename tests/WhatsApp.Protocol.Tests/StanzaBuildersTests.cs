@@ -166,6 +166,14 @@ public sealed class StanzaBuildersTests
         var list = receipt.GetChild("list");
         Assert.IsNotNull(list);
         Assert.AreEqual(2, list.GetChildren("item").Count());
+
+        var histReceipt = RoundTrip(ReceiptStanza.Build("msg-hs", Jid.Lid("10000001"), type: ReceiptStanza.TypeHistSync));
+        Assert.AreEqual("receipt", histReceipt.Tag);
+        Assert.AreEqual("hist_sync", histReceipt.GetAttr("type"));
+
+        var peerReceipt = RoundTrip(ReceiptStanza.Build("msg-pm", Jid.Lid("10000001"), type: ReceiptStanza.TypePeerMsg));
+        Assert.AreEqual("receipt", peerReceipt.Tag);
+        Assert.AreEqual("peer_msg", peerReceipt.GetAttr("type"));
     }
 
     private static Node RoundTrip(Node original)
