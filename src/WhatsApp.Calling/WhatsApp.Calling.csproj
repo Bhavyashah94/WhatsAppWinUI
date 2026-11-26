@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>WhatsApp.Calling</RootNamespace>
+    <AssemblyName>WhatsApp.Calling</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WhatsApp.Protocol\WhatsApp.Protocol.csproj" />
+    <ProjectReference Include="..\WhatsApp.WaProto\WhatsApp.WaProto.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="WhatsApp.Calling.Tests" />
+    <InternalsVisibleTo Include="WhatsApp.Api" />
+    <InternalsVisibleTo Include="WhatsApp.Api.Tests" />
+  </ItemGroup>
+</Project>

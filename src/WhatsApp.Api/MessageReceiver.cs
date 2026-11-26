@@ -1158,6 +1158,8 @@ public sealed class MessageReceiver
                     ?? (u.ProductMessage is { } pm ? (pm.Product?.HasTitle == true ? pm.Product.Title : (pm.HasBody ? pm.Body : null)) : null)
                     ?? (u.OrderMessage is { } om ? (om.HasOrderTitle ? om.OrderTitle : (om.HasMessage ? om.Message : (om.HasOrderId ? $"Order {om.OrderId}" : null))) : null)
                     ?? (u.RichResponseMessage is { } rich ? BotStanzas.ExtractRichResponse(rich).SummaryText : null)
+                    ?? (u.ScheduledCallCreationMessage is { HasTitle: true } scc ? scc.Title : null)
+                    ?? (u.CallLogMesssage is { } clm ? $"{(clm.IsVideo ? "Video" : "Voice")} call ({clm.CallOutcome})" : null)
                     ?? (u.StatusQuestionAnswerMessage is { HasText: true } sqa ? sqa.Text : null)
                     ?? (u.ReactionMessage is { HasText: true } rx ? rx.Text : null));
     }

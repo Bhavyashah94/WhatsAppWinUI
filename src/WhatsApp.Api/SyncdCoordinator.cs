@@ -613,6 +613,17 @@ public sealed class SyncdCoordinator : IAsyncDisposable
     private async Task ApplySideEffectsAsync(IReadOnlyList<DecodedAppStateMutation> mutations, CancellationToken ct)
     {
         string? latestPushName = null;
+        DeviceCredentials? cachedCreds = null;
+        bool credsLoaded = false;
+        async ValueTask<DeviceCredentials?> GetCredsAsync()
+        {
+            if (!credsLoaded)
+            {
+                cachedCreds = await _backend.Device.LoadAsync(ct).ConfigureAwait(false);
+                credsLoaded = true;
+            }
+            return cachedCreds;
+        }
         foreach (DecodedAppStateMutation mutation in mutations)
         {
             if (mutation.Operation == SyncdMutation.Types.SyncdOperation.Remove)
@@ -834,6 +845,25 @@ public sealed class SyncdCoordinator : IAsyncDisposable
                     qra.HasDeleted && qra.Deleted,
                     ts)).ConfigureAwait(false);
             }
+
+            if (av.PrivacySettingRelayAllCalls is { HasIsEnabled: true } rac)
+            {
+                await _emitEventAsync(new RelayAllCallsUpdatedEvent(rac.IsEnabled, ts)).ConfigureAwait(false);
+            }
+
+            if (av.CallLogAction?.CallLogRecord is { } clr
+                && mutation.Index is ["call_log", { Length: > 0 } callCreatorStr, { Length: > 0 } callId, ..])
+            {
+                DeviceCredentials? ownCreds = await GetCredsAsync().ConfigureAwait(false);
+                bool fromMe = IsOwnCreatorJid(ownCreds, callCreatorStr);
+                await _emitEventAsync(new CallLogSyncedEvent(
+                    callCreatorStr,
+                    callId,
+                    fromMe,
+                    ts,
+                    clr.Clone(),
+                    FromFullSync: false)).ConfigureAwait(false);
+            }
         }
 
         if (latestPushName is null)
@@ -841,12 +871,22 @@ public sealed class SyncdCoordinator : IAsyncDisposable
             return;
         }
 
-        DeviceCredentials? creds = await _backend.Device.LoadAsync(ct).ConfigureAwait(false);
+        DeviceCredentials? creds = await GetCredsAsync().ConfigureAwait(false);
         if (creds is not null && !string.Equals(creds.PushName, latestPushName, StringComparison.Ordinal))
         {
             creds.PushName = latestPushName;
             await _backend.Device.SaveAsync(creds, ct).ConfigureAwait(false);
         }
+    }
+
+    private static bool IsOwnCreatorJid(DeviceCredentials? creds, string rawCreator)
+    {
+        if (creds is null || !Jid.TryParse(rawCreator, out Jid creator))
+        {
+            return false;
+        }
+        return (creds.Pn is Jid pn && string.Equals(pn.User, creator.User, StringComparison.Ordinal))
+            || (creds.Lid is Jid lid && string.Equals(lid.User, creator.User, StringComparison.Ordinal));
     }
 
     private static AppStateCollectionPatchList? ParseSendResponse(string expectedCollection, Node response)

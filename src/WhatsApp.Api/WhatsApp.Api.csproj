@@ -5,6 +5,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\WhatsApp.Calling\WhatsApp.Calling.csproj" />
     <ProjectReference Include="..\WhatsApp.Protocol\WhatsApp.Protocol.csproj" />
     <ProjectReference Include="..\WhatsApp.WaProto\WhatsApp.WaProto.csproj" />
   </ItemGroup>

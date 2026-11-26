@@ -371,3 +371,60 @@ public sealed record BotQueryFanoutReceivedEvent(
     long? FanoutTimestamp,
     string? FanoutText,
     long TimestampSeconds) : WhatsAppEvent;
+
+// Phase 10A: Call Signaling, Call Logs & Relay Privacy Events
+public sealed record IncomingCallReceivedEvent(
+    WhatsApp.Protocol.Binary.Stanzas.IncomingCallStanza Call,
+    WhatsApp.Protocol.Binary.Node RawStanza) : WhatsAppEvent;
+
+public sealed record CallLogSyncedEvent(
+    string CallCreatorJid,
+    string CallId,
+    bool FromMe,
+    long TimestampMs,
+    Whatsapp.CallLogRecord Record,
+    bool FromFullSync) : WhatsAppEvent;
+
+public sealed record RelayAllCallsUpdatedEvent(
+    bool Enabled,
+    long TimestampMs) : WhatsAppEvent;
+
+// Phase 10B: Active 1:1 VoIP Media Session Events
+public sealed record CallMediaStateChangedEvent(
+    string CallId,
+    string Phase,
+    string? Reason = null) : WhatsAppEvent;
+
+public sealed record CallAudioFrameReceivedEvent(
+    string CallId,
+    byte[] EncodedPayload,
+    uint SampleRate,
+    int DurationMs) : WhatsAppEvent;
+
+public sealed record CallVideoFrameReceivedEvent(
+    string CallId,
+    byte[] AccessUnit,
+    uint Timestamp90k,
+    bool IsKeyframe) : WhatsAppEvent;
+
+// Phase 10C: Group Calls, Call Links, Rekeying & Screen Share Events
+public sealed record GroupCallUpdatedEvent(
+    WhatsApp.Protocol.Binary.Stanzas.GroupCallUpdate Update) : WhatsAppEvent;
+
+public sealed record GroupCallRekeyReceivedEvent(
+    string CallId,
+    string SenderDeviceJid,
+    uint TransactionId) : WhatsAppEvent;
+
+public sealed record GroupCallWaitingRoomUpdatedEvent(
+    WhatsApp.Protocol.Binary.Stanzas.WaitingRoom WaitingRoom) : WhatsAppEvent;
+
+public sealed record GroupCallRaisedHandChangedEvent(
+    string CallId,
+    string ParticipantJid,
+    bool Raised) : WhatsAppEvent;
+
+public sealed record GroupCallScreenShareChangedEvent(
+    string CallId,
+    string ParticipantJid,
+    WhatsApp.Protocol.Binary.Stanzas.ScreenShare ScreenShare) : WhatsAppEvent;

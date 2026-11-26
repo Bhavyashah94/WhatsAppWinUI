@@ -58,6 +58,19 @@ public sealed class AppStateSettingsClient
         return PushAsync(AppStateSchemas.ChannelsPersonalisedRecommendation, value, ct);
     }
 
+    public Task SetRelayAllCallsAsync(bool enabled, CancellationToken ct = default)
+    {
+        var value = new SyncActionValue
+        {
+            Timestamp = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds(),
+            PrivacySettingRelayAllCalls = new SyncActionValue.Types.PrivacySettingRelayAllCalls
+            {
+                IsEnabled = enabled
+            }
+        };
+        return PushAsync(AppStateSchemas.RelayAllCalls, value, ct);
+    }
+
     private Task PushAsync(AppStateActionSpec spec, SyncActionValue value, CancellationToken ct) =>
         _syncd.SendMutationAsync(
             spec.Collection,

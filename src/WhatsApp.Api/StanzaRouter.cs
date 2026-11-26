@@ -18,6 +18,7 @@ public sealed class StanzaHandlers
     public Func<Node, CancellationToken, ValueTask>? OnMessage { get; init; }
     public Func<Node, CancellationToken, ValueTask>? OnPresence { get; init; }
     public Func<Node, CancellationToken, ValueTask>? OnChatState { get; init; }
+    public Func<Node, CancellationToken, ValueTask>? OnCall { get; init; }
     public Func<Node, CancellationToken, ValueTask>? OnUnhandled { get; init; }
     public Action<long, Exception?>? OnClosed { get; init; }
 }
@@ -165,6 +166,14 @@ public sealed class StanzaRouter : IAsyncDisposable
                 if (_handlers.OnChatState is { } onChatState)
                 {
                     await onChatState(node, ct).ConfigureAwait(false);
+                    return;
+                }
+                break;
+
+            case "call":
+                if (_handlers.OnCall is { } onCall)
+                {
+                    await onCall(node, ct).ConfigureAwait(false);
                     return;
                 }
                 break;

@@ -121,7 +121,10 @@ public static class MessageStanzas
             || m.AlbumMessage is not null
             || m.NewsletterAdminInviteMessage is not null
             || m.NewsletterFollowerInviteMessageV2 is not null
-            || m.RichResponseMessage is not null)
+            || m.RichResponseMessage is not null
+            || m.ScheduledCallCreationMessage is not null
+            || m.ScheduledCallEditMessage is not null
+            || m.CallLogMesssage is not null)
         {
             return "text";
         }

@@ -81,6 +81,8 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
     private QuickRepliesClient? _activeQuickReplies;
     private BusinessClient? _activeBusiness;
     private BotClient? _activeBots;
+    private CallSignalingClient? _activeCallSignaling;
+    private CallClient? _activeCalls;
     private long _generation;
     private int _disposed;
 
@@ -137,6 +139,8 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
     public QuickRepliesClient? ActiveQuickReplies => Volatile.Read(ref _activeQuickReplies);
     public BusinessClient? ActiveBusiness => Volatile.Read(ref _activeBusiness);
     public BotClient? ActiveBots => Volatile.Read(ref _activeBots);
+    public CallSignalingClient? ActiveCallSignaling => Volatile.Read(ref _activeCallSignaling);
+    public CallClient? ActiveCalls => Volatile.Read(ref _activeCalls);
 
     /// <summary>
     /// Starts the managed background connect-and-reconnect loop until stopped, logged out/replaced,
@@ -261,6 +265,7 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
         NotificationRouter? notifications = null;
         KeepaliveWatchdog? watchdog = null;
         OfflineBatchCoordinator? offlineBatch = null;
+        CallClient? callClient = null;
 
         var sessionStopCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var routerClosedTcs = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -360,6 +365,8 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             var blockingClient = new BlockingClient(iqClient, _lidPnCache, EmitEventAsync, _options.TimeProvider);
             var businessClient = new BusinessClient(iqClient, mexClient, usync, credentials, _options.HttpClient);
             var botClient = new BotClient(iqClient, mexClient, messageSender, credentials, EmitEventAsync);
+            var callSignalingClient = new CallSignalingClient(socket, credentials, EmitEventAsync, syncd, _options.TimeProvider);
+            callClient = new CallClient(callSignalingClient, usync, preKeyFetcher, _backend, _lidPnCache, credentials, EmitEventAsync, timeProvider: _options.TimeProvider);
             LabelsClient? labelsClient = syncd is not null ? new LabelsClient(syncd, _options.TimeProvider) : null;
             QuickRepliesClient? quickRepliesClient = syncd is not null ? new QuickRepliesClient(syncd, _options.TimeProvider) : null;
             AppStateSettingsClient? appStateSettingsClient = syncd is not null ? new AppStateSettingsClient(syncd, _options.TimeProvider) : null;
@@ -394,6 +401,8 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             Volatile.Write(ref _activeBlocking, blockingClient);
             Volatile.Write(ref _activeBusiness, businessClient);
             Volatile.Write(ref _activeBots, botClient);
+            Volatile.Write(ref _activeCallSignaling, callSignalingClient);
+            Volatile.Write(ref _activeCalls, callClient);
             Volatile.Write(ref _activeLabels, labelsClient);
             Volatile.Write(ref _activeQuickReplies, quickRepliesClient);
             notifications = new NotificationRouter(
@@ -631,6 +640,7 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
                     {
                         messageSender.TryResolveMessageAck(n);
                         mediaReupload.NotifyReceiptAck(n);
+                        callSignalingClient.TryResolveCallAck(n);
                         if (_options.ExternalHandlers?.OnAck is { } extAck)
                         {
                             await extAck(n, t).ConfigureAwait(false);
@@ -713,6 +723,23 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
                             await extChat(n, t).ConfigureAwait(false);
                         }
                     }),
+                OnCall = (node, token) => DispatchTrafficNodeAsync(
+                    node,
+                    token,
+                    watchdog,
+                    offlineBatch,
+                    async (n, t) =>
+                    {
+                        IncomingCallStanza? parsed = await callSignalingClient.HandleCallStanzaAsync(n, t).ConfigureAwait(false);
+                        if (parsed is not null)
+                        {
+                            await callClient.ProcessIncomingCallStanzaAsync(parsed, n, t).ConfigureAwait(false);
+                        }
+                        if (_options.ExternalHandlers?.OnCall is { } extCall)
+                        {
+                            await extCall(n, t).ConfigureAwait(false);
+                        }
+                    }),
                 OnUnhandled = (node, token) => DispatchTrafficNodeAsync(node, token, watchdog, offlineBatch, _options.ExternalHandlers?.OnUnhandled),
 
                 OnClosed = (_, fault) => routerClosedTcs.TrySetResult(fault)
@@ -774,11 +801,14 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             Volatile.Write(ref _activeBlocking, null);
             Volatile.Write(ref _activeBusiness, null);
             Volatile.Write(ref _activeBots, null);
+            Volatile.Write(ref _activeCallSignaling, null);
+            Volatile.Write(ref _activeCalls, null);
             Volatile.Write(ref _activeLabels, null);
             Volatile.Write(ref _activeQuickReplies, null);
             sessionStopCts.Cancel();
 
             if (watchdog is not null) await watchdog.DisposeAsync().ConfigureAwait(false);
+            if (callClient is not null) await callClient.DisposeAsync().ConfigureAwait(false);
             if (router is not null) await router.DisposeAsync().ConfigureAwait(false);
             if (pairing is not null) await pairing.DisposeAsync().ConfigureAwait(false);
             if (syncd is not null) await syncd.DisposeAsync().ConfigureAwait(false);
@@ -901,7 +931,14 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
         }
     }
 
-    private ValueTask EmitEventAsync(WhatsAppEvent evt) => _events.Writer.WriteAsync(evt);
+    private ValueTask EmitEventAsync(WhatsAppEvent evt)
+    {
+        if (evt is RelayAllCallsUpdatedEvent rac)
+        {
+            Volatile.Read(ref _activeCallSignaling)?.ApplyRelayAllCallsSetting(rac.Enabled);
+        }
+        return _events.Writer.WriteAsync(evt);
+    }
 
     private static async Task WaitUntilCanceledAsync(CancellationToken token)
     {

@@ -106,6 +106,9 @@ public static class AppStateSchemas
     public static readonly AppStateActionSpec RelayAllCalls =
         new("setting_relayAllCalls", AppStateCollections.Regular, 1, 0);
 
+    public static readonly AppStateActionSpec CallLog =
+        new("call_log", AppStateCollections.Regular, 1, 3);
+
     // ─── Phase 9B: Business Labels & Quick Replies ───────────────────────
     public static readonly AppStateActionSpec LabelEdit =
         new("label_edit", AppStateCollections.Regular, 3, 1);

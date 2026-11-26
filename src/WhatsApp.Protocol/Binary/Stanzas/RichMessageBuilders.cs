@@ -897,4 +897,33 @@ public static class RichMessageBuilders
         }
         return new Message { RichResponseMessage = rich };
     }
+
+    public static Message BuildScheduledCallCreation(
+        long scheduledTimestampMs,
+        Message.Types.ScheduledCallCreationMessage.Types.CallType callType,
+        string? title = null)
+    {
+        var msg = new Message.Types.ScheduledCallCreationMessage
+        {
+            ScheduledTimestampMs = scheduledTimestampMs,
+            CallType = callType
+        };
+        if (!string.IsNullOrEmpty(title)) msg.Title = title;
+        return new Message { ScheduledCallCreationMessage = msg };
+    }
+
+    public static Message BuildScheduledCallEdit(
+        MessageKey key,
+        Message.Types.ScheduledCallEditMessage.Types.EditType editType = Message.Types.ScheduledCallEditMessage.Types.EditType.Cancel)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        return new Message
+        {
+            ScheduledCallEditMessage = new Message.Types.ScheduledCallEditMessage
+            {
+                Key = key.Clone(),
+                EditType = editType
+            }
+        };
+    }
 }
