@@ -196,7 +196,7 @@ public sealed class BroadcastClient
             deviceIdentityBytes: anyPkmsg ? _credentials.AccountIdentityBytes : null);
 
         var allowed = resolvedUsers.Select(u => u.ToString()).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        _retryCoordinator.CacheSentMessage(new CachedSentMessage(
+        await _retryCoordinator.CacheSentMessageAsync(new CachedSentMessage(
             msgId,
             broadcastListJid.ToNonAd(),
             MessageStanzas.ClassifyStanzaType(message),
@@ -204,7 +204,7 @@ public sealed class BroadcastClient
             MessageStanzas.ShouldHideDecryptFail(message),
             unpaddedBytes,
             "lid",
-            allowed));
+            allowed), ct).ConfigureAwait(false);
 
         await _socket.SendNodeAsync(stanza, ct).ConfigureAwait(false);
 

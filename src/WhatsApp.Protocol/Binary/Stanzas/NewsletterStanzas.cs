@@ -568,9 +568,11 @@ public static class NewsletterStanzas
                 view,
                 limit,
                 start_cursor = startCursor,
-                filters = (categories is not null || countryCodes is not null)
-                    ? new { categories, country_codes = countryCodes }
-                    : null
+                filters = new
+                {
+                    categories = categories ?? Array.Empty<string>(),
+                    country_codes = ToCountryCodesArray(countryCodes) ?? Array.Empty<string>()
+                }
             }
         };
 
@@ -586,7 +588,7 @@ public static class NewsletterStanzas
             input = new
             {
                 search_text = searchText,
-                categories,
+                categories = categories ?? Array.Empty<string>(),
                 limit,
                 start_cursor = startCursor
             }
@@ -601,7 +603,7 @@ public static class NewsletterStanzas
             fetch_status_metadata = fetchStatusMetadata,
             input = new
             {
-                country_codes = countryCodes,
+                country_codes = ToCountryCodesArray(countryCodes) ?? ["US"],
                 limit
             }
         };
@@ -617,10 +619,15 @@ public static class NewsletterStanzas
             input = new
             {
                 newsletter_id = channelJid.ToNonAdString(),
-                country_codes = countryCodes,
+                country_codes = ToCountryCodesArray(countryCodes) ?? Array.Empty<string>(),
                 limit
             }
         };
+
+    private static string[]? ToCountryCodesArray(string? countryCodes) =>
+        string.IsNullOrWhiteSpace(countryCodes)
+            ? null
+            : countryCodes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     public static IReadOnlyList<NewsletterMetadata> ParseSubscribedNewsletters(JsonElement? data)
     {

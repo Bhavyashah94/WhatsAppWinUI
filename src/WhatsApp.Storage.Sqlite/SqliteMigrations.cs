@@ -267,6 +267,72 @@ internal static class SqliteMigrations
                 INSERT INTO messages_fts(rowid, text, quoted_text)
                 VALUES (new.rowid, new.text, new.quoted_text);
             END;
+            """),
+        new(
+            Version: 5,
+            Name: "005_inbound_retry_counts",
+            Sql: """
+            CREATE TABLE IF NOT EXISTS inbound_retry_counts (
+                chat_jid TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                device_id INTEGER NOT NULL DEFAULT 1,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (chat_jid, message_id, device_id)
+            );
+            """),
+        new(
+            Version: 6,
+            Name: "006_chat_filters_stars_and_labels",
+            Sql: """
+            ALTER TABLE chats ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE messages ADD COLUMN is_starred INTEGER NOT NULL DEFAULT 0;
+
+            CREATE TABLE IF NOT EXISTS labels (
+                label_id TEXT NOT NULL,
+                device_id INTEGER NOT NULL DEFAULT 1,
+                name TEXT NOT NULL,
+                color INTEGER NOT NULL DEFAULT 0,
+                predefined_id INTEGER,
+                order_index INTEGER,
+                deleted INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (label_id, device_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS label_chats (
+                label_id TEXT NOT NULL,
+                chat_jid TEXT NOT NULL,
+                device_id INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (label_id, chat_jid, device_id)
+            );
+            """),
+        new(
+            Version: 7,
+            Name: "007_outbound_retry_cache",
+            Sql: """
+            CREATE TABLE IF NOT EXISTS outbound_retry_cache (
+                message_id TEXT NOT NULL,
+                device_id INTEGER NOT NULL DEFAULT 1,
+                to_chat_jid TEXT NOT NULL,
+                stanza_type TEXT NOT NULL,
+                media_type TEXT,
+                hide_decrypt_fail INTEGER NOT NULL DEFAULT 0,
+                unpadded_protobuf BLOB NOT NULL,
+                addressing_mode TEXT,
+                allowed_participants_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (message_id, device_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_outbound_retry_created
+                ON outbound_retry_cache(device_id, created_at DESC);
+            """),
+        new(
+            Version: 8,
+            Name: "008_interactive_messages",
+            Sql: """
+            ALTER TABLE messages ADD COLUMN interactive_json TEXT;
             """)
     ];
 

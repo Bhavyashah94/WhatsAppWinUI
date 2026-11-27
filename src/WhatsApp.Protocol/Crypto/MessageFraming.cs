@@ -77,6 +77,36 @@ public static class MessageFraming
     }
 
     /// <summary>
+    /// Unwraps a <see cref="Message.Types.DeviceSentMessage"/> received from a companion device,
+    /// restoring outer hoisted <see cref="Message.MessageContextInfo"/> fields (such as <c>MessageSecret</c>)
+    /// onto the inner <see cref="Message"/> matching <c>WAWebDeviceSentMessageProtoUtils.unwrapDeviceSentMessage</c>.
+    /// </summary>
+    public static Message UnwrapDeviceSentMessage(Message message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        if (message.DeviceSentMessage?.Message is not { } inner)
+        {
+            return message;
+        }
+
+        Message unwrapped = inner.Clone();
+        if (message.MessageContextInfo is { } outerCtx)
+        {
+            MessageContextInfo merged = outerCtx.Clone();
+            if (unwrapped.MessageContextInfo is { } innerCtx)
+            {
+                if (innerCtx.ThreadId.Count > 0)
+                {
+                    merged.ThreadId.Clear();
+                }
+                merged.MergeFrom(innerCtx);
+            }
+            unwrapped.MessageContextInfo = merged;
+        }
+        return unwrapped;
+    }
+
+    /// <summary>
     /// Validates and strips WhatsApp PKCS7-style random padding (<c>version != 3</c>), returning raw protobuf bytes.
     /// </summary>
     public static ReadOnlySpan<byte> UnpadMessage(ReadOnlySpan<byte> paddedPlaintext, int paddingVersion = DefaultPaddingVersion)

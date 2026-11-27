@@ -159,10 +159,29 @@ public sealed record MediaConnInfo(
     public bool IsExpired(TimeProvider? time = null) =>
         (time ?? TimeProvider.System).GetUtcNow() >= FetchedAtUtc + TimeSpan.FromSeconds(Math.Max(0, TtlSeconds));
 
-    public IEnumerable<string> GetOrderedHosts()
+    public IEnumerable<string> GetOrderedHosts() => DistinctHostnames(Hosts);
+
+    public IEnumerable<string> GetOrderedUploadHosts()
+    {
+        bool anyUploadHost = false;
+        foreach (string hostname in DistinctHostnames(Hosts.Where(static h => h.SupportsUpload)))
+        {
+            anyUploadHost = true;
+            yield return hostname;
+        }
+        if (!anyUploadHost)
+        {
+            foreach (string hostname in DistinctHostnames(Hosts))
+            {
+                yield return hostname;
+            }
+        }
+    }
+
+    private static IEnumerable<string> DistinctHostnames(IEnumerable<MediaConnHostInfo> source)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var h in Hosts)
+        foreach (MediaConnHostInfo h in source)
         {
             if (seen.Add(h.Hostname))
             {

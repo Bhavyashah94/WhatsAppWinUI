@@ -80,6 +80,7 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
     private LabelsClient? _activeLabels;
     private QuickRepliesClient? _activeQuickReplies;
     private BusinessClient? _activeBusiness;
+    private FlowClient? _activeFlows;
     private BotClient? _activeBots;
     private CallSignalingClient? _activeCallSignaling;
     private CallClient? _activeCalls;
@@ -138,6 +139,7 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
     public LabelsClient? ActiveLabels => Volatile.Read(ref _activeLabels);
     public QuickRepliesClient? ActiveQuickReplies => Volatile.Read(ref _activeQuickReplies);
     public BusinessClient? ActiveBusiness => Volatile.Read(ref _activeBusiness);
+    public FlowClient? ActiveFlows => Volatile.Read(ref _activeFlows);
     public BotClient? ActiveBots => Volatile.Read(ref _activeBots);
     public CallSignalingClient? ActiveCallSignaling => Volatile.Read(ref _activeCallSignaling);
     public CallClient? ActiveCalls => Volatile.Read(ref _activeCalls);
@@ -382,7 +384,7 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
                 historySync,
                 mediaTransfer,
                 onAppStateKeysSaved);
-            var messageSender = new MessageSender(socket, usync, preKeyFetcher, _backend, _lidPnCache, credentials, retryCoordinator, _options.TimeProvider);
+            var messageSender = new MessageSender(socket, usync, preKeyFetcher, _backend, _lidPnCache, credentials, retryCoordinator, _options.TimeProvider, _options.HttpClient);
             var presenceClient = new PresenceClient(socket, _backend, credentials, EmitEventAsync);
             var pdoHistory = new PdoHistoryClient(_backend, messageSender, credentials);
             var mexClient = new MexClient(iqClient);
@@ -399,6 +401,7 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             var newsletterClient = new NewsletterClient(iqClient, mexClient, socket, messageSender, _lidPnCache, mediaTransfer, EmitEventAsync, _options.TimeProvider);
             var blockingClient = new BlockingClient(iqClient, _lidPnCache, EmitEventAsync, _options.TimeProvider);
             var businessClient = new BusinessClient(iqClient, mexClient, usync, credentials, _options.HttpClient);
+            var flowClient = new FlowClient(mexClient, _lidPnCache, _options.HttpClient);
             var botClient = new BotClient(iqClient, mexClient, messageSender, credentials, EmitEventAsync);
             var callSignalingClient = new CallSignalingClient(socket, credentials, EmitEventAsync, syncd, _options.TimeProvider);
             callClient = new CallClient(callSignalingClient, usync, preKeyFetcher, _backend, _lidPnCache, credentials, EmitEventAsync, timeProvider: _options.TimeProvider);
@@ -435,6 +438,7 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             Volatile.Write(ref _activeNewsletters, newsletterClient);
             Volatile.Write(ref _activeBlocking, blockingClient);
             Volatile.Write(ref _activeBusiness, businessClient);
+            Volatile.Write(ref _activeFlows, flowClient);
             Volatile.Write(ref _activeBots, botClient);
             Volatile.Write(ref _activeCallSignaling, callSignalingClient);
             Volatile.Write(ref _activeCalls, callClient);
@@ -835,6 +839,7 @@ public sealed class ConnectionOrchestrator : IAsyncDisposable
             Volatile.Write(ref _activeNewsletters, null);
             Volatile.Write(ref _activeBlocking, null);
             Volatile.Write(ref _activeBusiness, null);
+            Volatile.Write(ref _activeFlows, null);
             Volatile.Write(ref _activeBots, null);
             Volatile.Write(ref _activeCallSignaling, null);
             Volatile.Write(ref _activeCalls, null);

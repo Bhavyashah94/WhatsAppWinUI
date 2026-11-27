@@ -53,7 +53,8 @@ public sealed record MessageRecord(
     long? EditedTimestamp = null,
     bool IsRevoked = false,
     ulong? FileLength = null,
-    string? ReactionsJson = null
+    string? ReactionsJson = null,
+    string? InteractiveJson = null
 );
 
 public sealed record ChatSummary(
@@ -67,7 +68,17 @@ public sealed record ChatSummary(
     string? DraftText = null,
     long? DraftTimestampMs = null,
     string? LastMessageText = null,
-    MessageType LastMessageType = MessageType.Unknown
+    MessageType LastMessageType = MessageType.Unknown,
+    bool IsFavorite = false
+);
+
+public sealed record LabelRecord(
+    string LabelId,
+    string Name,
+    int Color = 0,
+    int? PredefinedId = null,
+    int? OrderIndex = null,
+    bool Deleted = false
 );
 
 public sealed record ConversationRecord(

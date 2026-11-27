@@ -150,7 +150,11 @@ public sealed class GroupClient
     {
         string iqId = _iqClient.NextRequestId();
         await SendRequiredIqAsync(GroupManagementIq.BuildSetSubject(iqId, groupJid, subject), ct).ConfigureAwait(false);
-        UpdateCached(groupJid, g => g with { Subject = subject });
+        GroupMetadata? updated = UpdateCached(groupJid, g => g with { Subject = subject });
+        if (updated is not null)
+        {
+            await _backend.History.UpsertGroupAsync(ToRecord(groupJid.ToNonAdString(), updated), ct).ConfigureAwait(false);
+        }
     }
 
     public async Task SetDescriptionAsync(Jid groupJid, string? description, string? previousDescriptionId = null, CancellationToken ct = default)
@@ -162,7 +166,11 @@ public sealed class GroupClient
         }
         string iqId = _iqClient.NextRequestId();
         await SendRequiredIqAsync(GroupManagementIq.BuildSetDescription(iqId, groupJid, description, prevId), ct).ConfigureAwait(false);
-        UpdateCached(groupJid, g => g with { Description = description });
+        GroupMetadata? updated = UpdateCached(groupJid, g => g with { Description = description });
+        if (updated is not null)
+        {
+            await _backend.History.UpsertGroupAsync(ToRecord(groupJid.ToNonAdString(), updated), ct).ConfigureAwait(false);
+        }
     }
 
     public async Task SetLockedAsync(Jid groupJid, bool locked, CancellationToken ct = default)
@@ -549,15 +557,9 @@ public sealed class GroupClient
     {
         string key = meta.Id.ToNonAdString();
         _cache[key] = meta;
-        _groupRegistry?.Upsert(new GroupMetadataRecord(
-            key,
-            meta.Subject ?? string.Empty,
-            meta.Creator?.ToNonAdString(),
-            meta.CreationTime ?? 0,
-            meta.Description,
-            meta.IsLocked,
-            meta.IsAnnouncement,
-            meta.Participants.Count));
+        GroupMetadataRecord record = ToRecord(key, meta);
+        _groupRegistry?.Upsert(record);
+        await _backend.History.UpsertGroupAsync(record, ct).ConfigureAwait(false);
 
         var mappings = new List<LidPnMappingRecord>();
         foreach (GroupParticipantInfo p in meta.Participants)
@@ -588,32 +590,37 @@ public sealed class GroupClient
         }
     }
 
-    private void UpdateCached(Jid groupJid, Func<GroupMetadata, GroupMetadata> transform)
+    private GroupMetadata? UpdateCached(Jid groupJid, Func<GroupMetadata, GroupMetadata> transform)
     {
         string key = groupJid.ToNonAdString();
-        _cache.AddOrUpdate(
+        GroupMetadata? result = _cache.AddOrUpdate(
             key,
             static (_, _) => default!,
             (k, existing, fn) =>
             {
                 GroupMetadata next = fn(existing);
-                _groupRegistry?.Upsert(new GroupMetadataRecord(
-                    k,
-                    next.Subject ?? string.Empty,
-                    next.Creator?.ToNonAdString(),
-                    next.CreationTime ?? 0,
-                    next.Description,
-                    next.IsLocked,
-                    next.IsAnnouncement,
-                    next.Participants.Count));
+                _groupRegistry?.Upsert(ToRecord(k, next));
                 return next;
             },
             transform);
         if (_cache.TryGetValue(key, out GroupMetadata? val) && val is null)
         {
             _cache.TryRemove(key, out _);
+            return null;
         }
+        return result;
     }
+
+    private static GroupMetadataRecord ToRecord(string key, GroupMetadata meta) =>
+        new(
+            key,
+            meta.Subject ?? string.Empty,
+            meta.Creator?.ToNonAdString(),
+            meta.CreationTime ?? 0,
+            meta.Description,
+            meta.IsLocked,
+            meta.IsAnnouncement,
+            meta.Participants.Count);
 
     private static string ComputeGroupParticipantsPhash(GroupMetadata meta)
     {

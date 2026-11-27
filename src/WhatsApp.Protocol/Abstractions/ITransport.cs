@@ -25,6 +25,29 @@ public interface ITransportFactory
 /// </summary>
 public interface IHttpClient
 {
-    Task<byte[]> GetBytesAsync(Uri url, long maxBytes = 64 * 1024 * 1024, CancellationToken ct = default);
+    public const long DefaultMaxGetBytes = 64L * 1024 * 1024;
+    public const long DefaultMaxStreamDownloadBytes = 2L * 1024 * 1024 * 1024 + 64L * 1024 * 1024;
+
+    Task<byte[]> GetBytesAsync(Uri url, long maxBytes = DefaultMaxGetBytes, CancellationToken ct = default);
     Task<byte[]> PostBytesAsync(Uri url, ReadOnlyMemory<byte> body, string contentType = "application/octet-stream", CancellationToken ct = default);
+
+    async Task GetToStreamAsync(Uri url, Stream destination, long maxBytes = DefaultMaxStreamDownloadBytes, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        byte[] bytes = await GetBytesAsync(url, maxBytes, ct).ConfigureAwait(false);
+        await destination.WriteAsync(bytes, ct).ConfigureAwait(false);
+    }
+
+    async Task<byte[]> PostStreamAsync(
+        Uri url,
+        Stream body,
+        long? contentLength = null,
+        string contentType = "application/octet-stream",
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+        using var ms = contentLength is > 0 and <= int.MaxValue ? new MemoryStream((int)contentLength) : new MemoryStream();
+        await body.CopyToAsync(ms, ct).ConfigureAwait(false);
+        return await PostBytesAsync(url, ms.ToArray(), contentType, ct).ConfigureAwait(false);
+    }
 }

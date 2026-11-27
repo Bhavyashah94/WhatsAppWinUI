@@ -77,7 +77,9 @@ internal sealed class SqliteDeviceStore : IDeviceStore
                 "lid_pn_mapping",
                 "device_list_cache",
                 "tc_tokens",
-                "msg_secrets"
+                "msg_secrets",
+                "inbound_retry_counts",
+                "outbound_retry_cache"
             })
             {
                 using var clearCmd = conn.CreateCommand();

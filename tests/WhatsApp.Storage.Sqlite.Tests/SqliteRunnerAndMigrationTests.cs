@@ -70,7 +70,7 @@ public sealed class SqliteRunnerAndMigrationTests
             Assert.AreEqual("wal", journalMode.ToLowerInvariant());
             Assert.AreEqual("1", synchronous, "PRAGMA synchronous=NORMAL corresponds to 1");
             Assert.AreEqual("1", foreignKeys, "PRAGMA foreign_keys=ON corresponds to 1");
-            Assert.AreEqual(4L, migrationCount);
+            Assert.AreEqual(8L, migrationCount);
 
             foreach (string expectedTable in new[]
             {
@@ -88,13 +88,17 @@ public sealed class SqliteRunnerAndMigrationTests
                 "lid_pn_mapping",
                 "device_list_cache",
                 "tc_tokens",
+                "inbound_retry_counts",
+                "outbound_retry_cache",
                 "msg_secrets",
                 "chats",
                 "contacts",
                 "groups",
                 "messages",
                 "messages_fts",
-                "active_message_ranges"
+                "active_message_ranges",
+                "labels",
+                "label_chats"
             })
             {
                 Assert.IsTrue(tables.Contains(expectedTable), $"Missing expected table: {expectedTable}");
@@ -106,7 +110,8 @@ public sealed class SqliteRunnerAndMigrationTests
                 "idx_msg_secrets_expires",
                 "idx_chats_recent",
                 "idx_contacts_phone",
-                "idx_messages_chat_ts"
+                "idx_messages_chat_ts",
+                "idx_outbound_retry_created"
             })
             {
                 Assert.IsTrue(indexes.Contains(expectedIndex), $"Missing expected index: {expectedIndex}");
@@ -140,7 +145,7 @@ public sealed class SqliteRunnerAndMigrationTests
                 return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
             });
 
-            Assert.AreEqual(4L, migrationCount);
+            Assert.AreEqual(8L, migrationCount);
         }
         finally
         {

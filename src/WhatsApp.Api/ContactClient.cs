@@ -63,6 +63,7 @@ public sealed class ContactClient
             SyncdMutation.Types.SyncdOperation.Set,
             AppStateSchemas.Contact.BuildIndex(pnJid.ToString()),
             value,
+            actionVersion: AppStateSchemas.Contact.Version,
             ct: ct);
     }
 
@@ -96,6 +97,7 @@ public sealed class ContactClient
             SyncdMutation.Types.SyncdOperation.Set,
             AppStateSchemas.LidContact.BuildIndex(lidJid.ToString()),
             value,
+            actionVersion: AppStateSchemas.LidContact.Version,
             ct: ct);
     }
 
@@ -111,6 +113,7 @@ public sealed class ContactClient
             SyncdMutation.Types.SyncdOperation.Remove,
             AppStateSchemas.Contact.BuildIndex(pnJid.ToString()),
             new SyncActionValue { Timestamp = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds() },
+            actionVersion: AppStateSchemas.Contact.Version,
             ct: ct);
     }
 }

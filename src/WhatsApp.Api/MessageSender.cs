@@ -14,7 +14,8 @@ public sealed record SendMessageResult(
     string MessageId,
     string ChatJid,
     int TargetDeviceCount,
-    string? Phash);
+    string? Phash,
+    bool AckReceived = false);
 
 /// <summary>
 /// Outbound 1:1 DM, companion <see cref="DeviceSentMessage"/> sync, Group <c>SenderKey</c> +
@@ -33,6 +34,7 @@ public sealed class MessageSender
     private readonly DeviceCredentials _credentials;
     private readonly RetryCoordinator _retryCoordinator;
     private readonly TimeProvider _timeProvider;
+    private readonly IHttpClient? _httpClient;
     private readonly ConcurrentDictionary<string, TaskCompletionSource<(string? ErrorCode, string? ErrorText)>> _ackWaiters = new(StringComparer.Ordinal);
     private long _msgSeq;
 
@@ -44,7 +46,8 @@ public sealed class MessageSender
         ILidPnCache lidPnCache,
         DeviceCredentials credentials,
         RetryCoordinator retryCoordinator,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IHttpClient? httpClient = null)
     {
         _socket = socket ?? throw new ArgumentNullException(nameof(socket));
         _usync = usync ?? throw new ArgumentNullException(nameof(usync));
@@ -54,6 +57,7 @@ public sealed class MessageSender
         _credentials = credentials ?? throw new ArgumentNullException(nameof(credentials));
         _retryCoordinator = retryCoordinator ?? throw new ArgumentNullException(nameof(retryCoordinator));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _httpClient = httpClient;
     }
 
     public string NextMessageId()
@@ -69,13 +73,18 @@ public sealed class MessageSender
         IReadOnlyList<Jid>? groupParticipants = null,
         string? messageId = null,
         bool includeReportingToken = true,
+        IReadOnlyList<Jid>? mentionedJids = null,
+        bool mentionAll = false,
+        bool awaitServerAck = false,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(text);
-        var msg = new Message { Conversation = text };
+        Message msg = (mentionedJids is { Count: > 0 } || mentionAll)
+            ? RichMessageBuilders.BuildMentionText(text, mentionedJids?.Select(j => j.ToNonAdString()).ToArray(), mentionAll)
+            : new Message { Conversation = text };
         if (toJid.IsNewsletter())
         {
-            return SendNewsletterMessageAsync(toJid, msg, messageId, ct: ct);
+            return SendNewsletterMessageAsync(toJid, msg, messageId, awaitServerAck: awaitServerAck, ct: ct);
         }
         if (toJid.IsGroup())
         {
@@ -83,10 +92,10 @@ public sealed class MessageSender
             {
                 throw new ArgumentException("Group participant JIDs are required when sending to a @g.us chat.", nameof(groupParticipants));
             }
-            return SendGroupMessageAsync(toJid, msg, groupParticipants, messageId, includeReportingToken: includeReportingToken, ct: ct);
+            return SendGroupMessageAsync(toJid, msg, groupParticipants, messageId, includeReportingToken: includeReportingToken, awaitServerAck: awaitServerAck, ct: ct);
         }
 
-        return SendDmAsync(toJid, msg, messageId, includeReportingToken: includeReportingToken, ct: ct);
+        return SendDmAsync(toJid, msg, messageId, includeReportingToken: includeReportingToken, awaitServerAck: awaitServerAck, ct: ct);
     }
 
     public async Task<SendMessageResult> SendNewsletterMessageAsync(
@@ -133,10 +142,11 @@ public sealed class MessageSender
         string? editAttribute = null,
         string? category = null,
         IReadOnlyList<Node>? extraNodes = null,
+        bool awaitServerAck = false,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(message);
-        Jid toBare = toJid.ToNonAd();
+        Jid toBare = ResolveDmTargetBare(toJid);
         string msgId = string.IsNullOrWhiteSpace(messageId) ? NextMessageId() : messageId;
 
         Jid ownBare = GetOwnUserForAddressing(toBare);
@@ -208,8 +218,33 @@ public sealed class MessageSender
             }
         }
 
+        byte[]? persistedMsgSecret32 = reportingToken?.MessageSecret32 is { Length: 32 } rtSec
+            ? rtSec
+            : (msgToSend.MessageContextInfo?.MessageSecret is { Length: 32 } cs ? cs.ToByteArray() : null);
+
+        // Bot 1:1 targets need BotMessageSecret (= DeriveBaseBotKey(MessageSecret)) without raw MessageSecret,
+        // whereas own companion DeviceSentMessage copies and cached retry state MUST keep raw MessageSecret
+        // so Phone/Desktop/Web can decrypt subsequent bot <enc type="msmsg"> replies.
+        Message dmWireMsg = msgToSend;
+        if (toBare.IsBot())
+        {
+            dmWireMsg = msgToSend.Clone();
+            dmWireMsg.MessageContextInfo ??= new MessageContextInfo();
+            if (persistedMsgSecret32 is { Length: 32 } && !dmWireMsg.MessageContextInfo.HasBotMessageSecret)
+            {
+                dmWireMsg.MessageContextInfo.BotMessageSecret = ByteString.CopyFrom(
+                    BotMessageCrypto.DeriveBaseBotKey(persistedMsgSecret32));
+            }
+            dmWireMsg.MessageContextInfo.ClearMessageSecret();
+            if (dmWireMsg.ProtocolMessage?.Key is { } pmKey)
+            {
+                pmKey.ClearRemoteJid();
+                pmKey.ClearParticipant();
+            }
+        }
+
         byte[] unpaddedBytes = msgToSend.ToByteArray();
-        byte[] paddedDm = MessageFraming.PadMessageV2(unpaddedBytes);
+        byte[] paddedDm = MessageFraming.PadMessageV2(dmWireMsg.ToByteArray());
         string? dsmPhash = allParticipantDevices.Count > 1
             ? MessageFraming.ComputeParticipantListHash(allParticipantDevices)
             : null;
@@ -230,7 +265,7 @@ public sealed class MessageSender
                 continue;
             }
 
-            bool isOwnCompanion = string.Equals(dev.User, ownBare.User, StringComparison.OrdinalIgnoreCase) && !isSelfChat;
+            bool isOwnCompanion = string.Equals(dev.User, ownBare.User, StringComparison.OrdinalIgnoreCase);
             byte[] plaintext = isOwnCompanion ? paddedDsm : paddedDm;
             SignalEncryptedPayload enc = SignalCipher.Encrypt(session, plaintext, _credentials.IdentityKey, _credentials.RegistrationId);
             await _backend.Signal.SaveSessionAsync(dev.ToProtocolAddress(), session, ct).ConfigureAwait(false);
@@ -248,6 +283,28 @@ public sealed class MessageSender
         bool hideDecryptFail = MessageStanzas.ShouldHideDecryptFail(msgToSend, editAttribute);
         Jid? peerRecipientPn = isSelfChat && toBare.IsLid() ? _credentials.Pn?.ToNonAd() : null;
         IReadOnlyList<Node>? resolvedExtraNodes = AppendInferredMetaIfAbsent(msgToSend, extraNodes);
+        if ((resolvedExtraNodes is null || !resolvedExtraNodes.Any(n => string.Equals(n.Tag, "biz", StringComparison.Ordinal)))
+            && MessageStanzas.InferBizNode(msgToSend) is { } bizNode)
+        {
+            resolvedExtraNodes = resolvedExtraNodes is { Count: > 0 }
+                ? [.. resolvedExtraNodes, bizNode]
+                : [bizNode];
+        }
+        if (toBare.IsBot() && (resolvedExtraNodes is null || !resolvedExtraNodes.Any(n => string.Equals(n.Tag, "bot", StringComparison.Ordinal))))
+        {
+            bool isFeedback = msgToSend.ProtocolMessage?.Type == Message.Types.ProtocolMessage.Types.Type.BotFeedbackMessage;
+            bool isWelcome = msgToSend.ProtocolMessage?.Type == Message.Types.ProtocolMessage.Types.Type.RequestWelcomeMessage;
+            var botAttrs = new Dictionary<string, NodeValue>(StringComparer.Ordinal)
+            {
+                ["type"] = isFeedback ? "feedback" : (isWelcome ? "request_welcome" : "prompt"),
+                ["persona_type"] = "default",
+                ["agent_engagement_type"] = "direct_chat"
+            };
+            var botNode = new Node("bot", botAttrs);
+            resolvedExtraNodes = resolvedExtraNodes is { Count: > 0 }
+                ? [.. resolvedExtraNodes, botNode]
+                : [botNode];
+        }
 
         Node stanza = MessageStanzas.BuildDmStanza(
             msgId,
@@ -264,7 +321,7 @@ public sealed class MessageSender
             extraNodes: resolvedExtraNodes);
 
         var allowedUsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { toBare.ToString(), ownBare.ToString() };
-        _retryCoordinator.CacheSentMessage(new CachedSentMessage(
+        await _retryCoordinator.CacheSentMessageAsync(new CachedSentMessage(
             msgId,
             toBare,
             stanzaType,
@@ -272,13 +329,18 @@ public sealed class MessageSender
             hideDecryptFail,
             unpaddedBytes,
             AddressingMode: null,
-            allowedUsers));
+            allowedUsers), ct).ConfigureAwait(false);
 
-        await _socket.SendNodeAsync(stanza, ct).ConfigureAwait(false);
-        await PersistSentMetadataAsync(msgId, toBare.ToString(), ownBare.ToString(), msgToSend, reportingToken?.MessageSecret32, ct)
+        var (ackReceived, errCode, errText) = await SendWithOptionalAckWaitAsync(stanza, msgId, awaitServerAck, ct)
+            .ConfigureAwait(false);
+        if (!string.IsNullOrEmpty(errCode))
+        {
+            throw new InvalidOperationException($"DM send failed for '{msgId}': error={errCode} ({errText ?? "unknown"})");
+        }
+        await PersistSentMetadataAsync(msgId, toBare.ToString(), ownBare.ToString(), msgToSend, persistedMsgSecret32, ct)
             .ConfigureAwait(false);
 
-        return new SendMessageResult(msgId, toBare.ToString(), encryptedDevices.Count, dsmPhash);
+        return new SendMessageResult(msgId, toBare.ToString(), encryptedDevices.Count, dsmPhash, ackReceived);
     }
 
     public async Task<SendMessageResult> SendGroupMessageAsync(
@@ -291,6 +353,9 @@ public sealed class MessageSender
         string? editAttribute = null,
         string? addressingMode = null,
         IReadOnlyList<Node>? extraNodes = null,
+        bool awaitServerAck = false,
+        IReadOnlyList<Jid>? botFanoutTargets = null,
+        string? botEngagementType = null,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -309,9 +374,19 @@ public sealed class MessageSender
 
         var uniqueUsers = new List<Jid>();
         var seenUsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var memberBotUsers = new List<Jid>();
+        var seenBots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (Jid p in participantUsers.Append(ownBare))
         {
             Jid b = p.ToNonAd();
+            if (b.IsBot())
+            {
+                if (seenBots.Add(b.ToString()))
+                {
+                    memberBotUsers.Add(b);
+                }
+                continue;
+            }
             if (seenUsers.Add(b.ToString()))
             {
                 uniqueUsers.Add(b);
@@ -337,7 +412,13 @@ public sealed class MessageSender
             }
         }
 
-        string phash = MessageFraming.ComputeParticipantListHash(allDevices);
+        var phashDevices = new List<Jid>(allDevices.Count + memberBotUsers.Count);
+        phashDevices.AddRange(allDevices);
+        foreach (Jid mb in memberBotUsers)
+        {
+            phashDevices.Add(mb with { Device = 0 });
+        }
+        string phash = MessageFraming.ComputeParticipantListHash(phashDevices);
 
         byte[]? skBytes = await _backend.Signal.GetSenderKeyAsync(groupStr, ownSenderAddr, ct).ConfigureAwait(false);
         SenderKeyRecord senderRecord = skBytes is { Length: > 0 }
@@ -417,6 +498,65 @@ public sealed class MessageSender
         bool hideDecryptFail = MessageStanzas.ShouldHideDecryptFail(msgToSend, editAttribute);
         IReadOnlyList<Node>? resolvedExtraNodes = AppendInferredMetaIfAbsent(msgToSend, extraNodes);
 
+        var combinedBotTargets = new List<Jid>();
+        var seenAllBots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Jid mb in memberBotUsers)
+        {
+            Jid bDev = mb.ToNonAd() with { Device = 0 };
+            if (seenAllBots.Add(bDev.ToString())) combinedBotTargets.Add(bDev);
+        }
+        if (botFanoutTargets is not null)
+        {
+            foreach (Jid bt in botFanoutTargets)
+            {
+                Jid bDev = bt.ToNonAd() with { Device = 0 };
+                if (seenAllBots.Add(bDev.ToString())) combinedBotTargets.Add(bDev);
+            }
+        }
+
+        if (combinedBotTargets.Count > 0 && (extraNodes is null || !extraNodes.Any(n => string.Equals(n.Tag, "bot", StringComparison.Ordinal))))
+        {
+            byte[]? effectiveSecret32 = reportingToken?.MessageSecret32
+                ?? (msgToSend.MessageContextInfo?.MessageSecret is { Length: 32 } ms ? ms.ToByteArray() : null);
+
+            Message botProto = msgToSend.Clone();
+            botProto.MessageContextInfo ??= new MessageContextInfo();
+            botProto.MessageContextInfo.ClearMessageSecret();
+            if (effectiveSecret32 is { Length: 32 })
+            {
+                botProto.MessageContextInfo.BotMessageSecret = ByteString.CopyFrom(BotMessageCrypto.DeriveBaseBotKey(effectiveSecret32));
+            }
+            ReplaceBotMentionWithDisplayName(botProto, combinedBotTargets[0]);
+            byte[] paddedBotProto = MessageFraming.EncodeAndPadMessage(botProto);
+
+            SessionEnsureResult botEnsured = await _preKeyFetcher.EnsureSessionsAsync(combinedBotTargets, reason: null, ct).ConfigureAwait(false);
+            Jid primaryBot = combinedBotTargets[0];
+            if (botEnsured.Sessions.TryGetValue(primaryBot, out SignalSession? botSession))
+            {
+                SignalEncryptedPayload botEnc = SignalCipher.Encrypt(botSession, paddedBotProto, _credentials.IdentityKey, _credentials.RegistrationId);
+                await _backend.Signal.SaveSessionAsync(primaryBot.ToProtocolAddress(), botSession, ct).ConfigureAwait(false);
+                if (botEnc.Type == SignalCiphertextType.PreKeyMessage)
+                {
+                    anyPkmsg = true;
+                }
+
+                string effectiveEngagement = !string.IsNullOrEmpty(botEngagementType)
+                    ? botEngagementType
+                    : (memberBotUsers.Count > 0 ? "member" : "invoked");
+                Node botNode = MessageStanzas.BuildBotFanoutNode(
+                    primaryBot,
+                    botEnc.WireType,
+                    botEnc.Bytes,
+                    agentEngagementType: effectiveEngagement,
+                    mediaType: memberBotUsers.Count > 0 ? mediaType : null);
+
+                var withBot = new List<Node>((resolvedExtraNodes?.Count ?? 0) + 1);
+                if (resolvedExtraNodes is not null) withBot.AddRange(resolvedExtraNodes);
+                withBot.Add(botNode);
+                resolvedExtraNodes = withBot;
+            }
+        }
+
         Node stanza = MessageStanzas.BuildGroupStanza(
             msgId,
             groupBare,
@@ -432,7 +572,13 @@ public sealed class MessageSender
             addressingMode: addressingMode,
             extraNodes: resolvedExtraNodes);
 
-        _retryCoordinator.CacheSentMessage(new CachedSentMessage(
+        var allowedRecipients = new HashSet<string>(seenUsers, StringComparer.OrdinalIgnoreCase);
+        foreach (Jid bt in combinedBotTargets)
+        {
+            allowedRecipients.Add(bt.ToNonAdString());
+        }
+
+        await _retryCoordinator.CacheSentMessageAsync(new CachedSentMessage(
             msgId,
             groupBare,
             stanzaType,
@@ -440,9 +586,14 @@ public sealed class MessageSender
             hideDecryptFail,
             unpaddedBytes,
             addressingMode,
-            seenUsers));
+            allowedRecipients), ct).ConfigureAwait(false);
 
-        await _socket.SendNodeAsync(stanza, ct).ConfigureAwait(false);
+        var (ackReceived, errCode, errText) = await SendWithOptionalAckWaitAsync(stanza, msgId, awaitServerAck, ct)
+            .ConfigureAwait(false);
+        if (!string.IsNullOrEmpty(errCode))
+        {
+            throw new InvalidOperationException($"Group send failed for '{msgId}': error={errCode} ({errText ?? "unknown"})");
+        }
 
         if (newlyDistributed.Count > 0)
         {
@@ -452,7 +603,7 @@ public sealed class MessageSender
         await PersistSentMetadataAsync(msgId, groupStr, ownBare.ToString(), msgToSend, reportingToken?.MessageSecret32, ct)
             .ConfigureAwait(false);
 
-        return new SendMessageResult(msgId, groupStr, allDevices.Count, phash);
+        return new SendMessageResult(msgId, groupStr, phashDevices.Count, phash, ackReceived);
     }
 
     /// <summary>
@@ -465,10 +616,14 @@ public sealed class MessageSender
         Message quotedMessage,
         IReadOnlyList<Jid>? groupParticipants = null,
         string? messageId = null,
+        IReadOnlyList<Jid>? mentionedJids = null,
+        bool mentionAll = false,
+        bool awaitServerAck = false,
         CancellationToken ct = default)
     {
-        Message reply = RichMessageBuilders.BuildReplyText(text, quotedKey, quotedMessage);
-        return SendRichMessageAsync(toJid, reply, groupParticipants, messageId, ct: ct);
+        string[]? mentions = mentionedJids?.Select(j => j.ToNonAdString()).ToArray();
+        Message reply = RichMessageBuilders.BuildReplyText(text, quotedKey, quotedMessage, mentionedJids: mentions, mentionAll: mentionAll);
+        return SendRichMessageAsync(toJid, reply, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
     }
 
     public Task<SendMessageResult> SendReactionAsync(
@@ -478,16 +633,17 @@ public sealed class MessageSender
         bool encrypted = false,
         string? parentOriginalSenderJid = null,
         IReadOnlyList<Jid>? groupParticipants = null,
+        bool awaitServerAck = false,
         CancellationToken ct = default)
     {
         long nowMs = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
         if (!encrypted)
         {
             Message rx = RichMessageBuilders.BuildReaction(targetKey, emojiText, nowMs);
-            return SendRichMessageAsync(toJid, rx, groupParticipants, ct: ct);
+            return SendRichMessageAsync(toJid, rx, groupParticipants, awaitServerAck: awaitServerAck, ct: ct);
         }
 
-        return SendEncryptedReactionAsync(toJid, targetKey, emojiText, nowMs, parentOriginalSenderJid, groupParticipants, ct);
+        return SendEncryptedReactionAsync(toJid, targetKey, emojiText, nowMs, parentOriginalSenderJid, groupParticipants, awaitServerAck, ct);
     }
 
     private async Task<SendMessageResult> SendEncryptedReactionAsync(
@@ -497,6 +653,7 @@ public sealed class MessageSender
         long nowMs,
         string? parentOriginalSenderJid,
         IReadOnlyList<Jid>? groupParticipants,
+        bool awaitServerAck,
         CancellationToken ct)
     {
         (byte[] Secret, long? Timestamp)? stored = await _backend.MsgSecrets.GetMsgSecretAsync(targetKey.Id, ct).ConfigureAwait(false);
@@ -510,16 +667,17 @@ public sealed class MessageSender
             ?? (targetKey.HasParticipant && !string.IsNullOrEmpty(targetKey.Participant) ? targetKey.Participant : toJid.ToNonAdString());
 
         Message encRx = RichMessageBuilders.BuildEncReaction(targetKey, emojiText, nowMs, entry.Secret, parentSender, reactor);
-        return await SendRichMessageAsync(toJid, encRx, groupParticipants, ct: ct).ConfigureAwait(false);
+        return await SendRichMessageAsync(toJid, encRx, groupParticipants, awaitServerAck: awaitServerAck, ct: ct).ConfigureAwait(false);
     }
 
     public async Task<SendMessageResult> SendMessageEditAsync(
         Jid toJid,
         MessageKey originalKey,
         Message newContent,
-        bool preferSecretEncrypted = true,
+        bool preferSecretEncrypted = false,
         string? originalSenderJid = null,
         IReadOnlyList<Jid>? groupParticipants = null,
+        bool awaitServerAck = false,
         CancellationToken ct = default)
     {
         long nowMs = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
@@ -528,7 +686,13 @@ public sealed class MessageSender
         if (preferSecretEncrypted
             && await _backend.MsgSecrets.GetMsgSecretAsync(originalKey.Id, ct).ConfigureAwait(false) is { Secret.Length: 32 } entry)
         {
-            string editor = GetOwnUserForAddressing(toJid).ToNonAdString();
+            bool useLid = toJid.IsLid()
+                || toJid.Server == Server.Bot
+                || (toJid.IsGroup() && ((groupParticipants?.Any(p => p.IsLid()) == true)
+                    || (!string.IsNullOrEmpty(originalSenderJid) && Jid.TryParse(originalSenderJid, out Jid os) && os.IsLid())));
+            string editor = (useLid && _credentials.Lid is Jid lid
+                ? lid.ToNonAd()
+                : (_credentials.Pn?.ToNonAd() ?? _credentials.Lid!.Value.ToNonAd())).ToString();
             string origSender = originalSenderJid ?? editor;
             editProto = RichMessageBuilders.BuildSecretMessageEdit(originalKey, newContent, nowMs, entry.Secret, origSender, editor);
         }
@@ -537,12 +701,20 @@ public sealed class MessageSender
             editProto = RichMessageBuilders.BuildLegacyMessageEdit(originalKey, newContent, nowMs);
         }
 
-        return await SendRichMessageAsync(
+        SendMessageResult res = await SendRichMessageAsync(
             toJid,
             editProto,
             groupParticipants,
             editAttribute: RichMessageBuilders.EditAttrMessageEdit,
+            awaitServerAck: awaitServerAck,
             ct: ct).ConfigureAwait(false);
+
+        string? editedText = newContent.HasConversation
+            ? newContent.Conversation
+            : newContent.ExtendedTextMessage?.Text;
+        await _backend.History.ApplyMessageEditAsync(res.ChatJid, originalKey.Id, editedText, nowMs / 1000, ct)
+            .ConfigureAwait(false);
+        return res;
     }
 
     public Task<SendMessageResult> SendRevokeAsync(
@@ -550,10 +722,11 @@ public sealed class MessageSender
         MessageKey targetKey,
         bool isAdminRevoke = false,
         IReadOnlyList<Jid>? groupParticipants = null,
+        bool awaitServerAck = false,
         CancellationToken ct = default)
     {
         (Message revokeProto, string editAttr) = RichMessageBuilders.BuildRevoke(targetKey, isAdminRevoke);
-        return SendRichMessageAsync(toJid, revokeProto, groupParticipants, editAttribute: editAttr, ct: ct);
+        return SendRichMessageAsync(toJid, revokeProto, groupParticipants, editAttribute: editAttr, awaitServerAck: awaitServerAck, ct: ct);
     }
 
     public Task<SendMessageResult> SendPinInChatAsync(
@@ -561,11 +734,19 @@ public sealed class MessageSender
         MessageKey targetKey,
         bool pin,
         IReadOnlyList<Jid>? groupParticipants = null,
+        bool awaitServerAck = false,
+        uint durationSeconds = 604_800,
         CancellationToken ct = default)
     {
         long nowMs = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
-        Message msg = RichMessageBuilders.BuildPinInChat(targetKey, pin, nowMs);
-        return SendRichMessageAsync(toJid, msg, groupParticipants, ct: ct);
+        Message msg = RichMessageBuilders.BuildPinInChat(targetKey, pin, nowMs, durationSeconds);
+        return SendRichMessageAsync(
+            toJid,
+            msg,
+            groupParticipants,
+            editAttribute: RichMessageBuilders.EditAttrPinInChat,
+            awaitServerAck: awaitServerAck,
+            ct: ct);
     }
 
     public Task<SendMessageResult> SendKeepInChatAsync(
@@ -573,11 +754,12 @@ public sealed class MessageSender
         MessageKey targetKey,
         bool keep,
         IReadOnlyList<Jid>? groupParticipants = null,
+        bool awaitServerAck = false,
         CancellationToken ct = default)
     {
         long nowMs = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
         Message msg = RichMessageBuilders.BuildKeepInChat(targetKey, keep, nowMs);
-        return SendRichMessageAsync(toJid, msg, groupParticipants, ct: ct);
+        return SendRichMessageAsync(toJid, msg, groupParticipants, awaitServerAck: awaitServerAck, ct: ct);
     }
 
     public Task<SendMessageResult> SendPollAsync(
@@ -590,11 +772,12 @@ public sealed class MessageSender
         bool allowAddOption = false,
         IReadOnlyList<Jid>? groupParticipants = null,
         string? messageId = null,
+        bool awaitServerAck = false,
         CancellationToken ct = default)
     {
         Message poll = RichMessageBuilders.BuildPollCreation(
             question, options, selectableCount, version, quizCorrectOption, allowAddOption);
-        return SendRichMessageAsync(toJid, poll, groupParticipants, messageId, ct: ct);
+        return SendRichMessageAsync(toJid, poll, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
     }
 
     public async Task<SendMessageResult> SendPollVoteAsync(
@@ -603,6 +786,7 @@ public sealed class MessageSender
         IReadOnlyList<string> selectedOptions,
         string pollCreatorJid,
         IReadOnlyList<Jid>? groupParticipants = null,
+        bool awaitServerAck = false,
         CancellationToken ct = default)
     {
         (byte[] Secret, long? Timestamp)? stored = await _backend.MsgSecrets.GetMsgSecretAsync(pollKey.Id, ct).ConfigureAwait(false);
@@ -614,7 +798,7 @@ public sealed class MessageSender
         string voter = GetOwnUserForAddressing(toJid).ToNonAdString();
         long nowMs = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
         Message voteMsg = RichMessageBuilders.BuildPollVote(pollKey, selectedOptions, entry.Secret, pollCreatorJid, voter, nowMs);
-        return await SendRichMessageAsync(toJid, voteMsg, groupParticipants, ct: ct).ConfigureAwait(false);
+        return await SendRichMessageAsync(toJid, voteMsg, groupParticipants, awaitServerAck: awaitServerAck, ct: ct).ConfigureAwait(false);
     }
 
     public Task<SendMessageResult> SendEventAsync(
@@ -626,10 +810,11 @@ public sealed class MessageSender
         string? locationName = null,
         string? joinLink = null,
         IReadOnlyList<Jid>? groupParticipants = null,
+        bool awaitServerAck = false,
         CancellationToken ct = default)
     {
         Message evt = RichMessageBuilders.BuildEvent(name, description, startTimeSeconds, endTimeSeconds, locationName, joinLink);
-        return SendRichMessageAsync(toJid, evt, groupParticipants, ct: ct);
+        return SendRichMessageAsync(toJid, evt, groupParticipants, awaitServerAck: awaitServerAck, ct: ct);
     }
 
     public async Task<SendMessageResult> SendEventResponseAsync(
@@ -639,6 +824,7 @@ public sealed class MessageSender
         string eventCreatorJid,
         int extraGuests = 0,
         IReadOnlyList<Jid>? groupParticipants = null,
+        bool awaitServerAck = false,
         CancellationToken ct = default)
     {
         (byte[] Secret, long? Timestamp)? stored = await _backend.MsgSecrets.GetMsgSecretAsync(eventKey.Id, ct).ConfigureAwait(false);
@@ -650,7 +836,36 @@ public sealed class MessageSender
         string responder = GetOwnUserForAddressing(toJid).ToNonAdString();
         long nowMs = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
         Message resp = RichMessageBuilders.BuildEventResponse(eventKey, responseType, nowMs, entry.Secret, eventCreatorJid, responder, extraGuests);
-        return await SendRichMessageAsync(toJid, resp, groupParticipants, ct: ct).ConfigureAwait(false);
+        return await SendRichMessageAsync(toJid, resp, groupParticipants, awaitServerAck: awaitServerAck, ct: ct).ConfigureAwait(false);
+    }
+
+    public Task<SendMessageResult> SendContactAsync(
+        Jid toJid,
+        string displayName,
+        string vcard,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        Message contactMsg = RichMessageBuilders.BuildContact(displayName, vcard);
+        return SendRichMessageAsync(toJid, contactMsg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
+    }
+
+    public Task<SendMessageResult> SendLocationAsync(
+        Jid toJid,
+        double latitude,
+        double longitude,
+        string? name = null,
+        string? address = null,
+        string? url = null,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        Message locMsg = RichMessageBuilders.BuildLocation(latitude, longitude, name, address, url);
+        return SendRichMessageAsync(toJid, locMsg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
     }
 
     public Task<SendMessageResult> SendDraftSyncAsync(
@@ -668,19 +883,338 @@ public sealed class MessageSender
         return SendDmAsync(ownPeerTarget, syncMsg, includeReportingToken: false, category: "peer", ct: ct);
     }
 
+    public Task<SendMessageResult> SendListResponseAsync(
+        Jid toJid,
+        string selectedRowId,
+        string title,
+        string? description = null,
+        MessageKey? quotedKey = null,
+        Message? quotedMessage = null,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        ContextInfo? ctx = RichMessageBuilders.BuildQuoteContextInfo(quotedKey, quotedMessage);
+        Message msg = RichMessageBuilders.BuildListResponseMessage(selectedRowId, title, description, ctx);
+        return SendRichMessageAsync(toJid, msg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
+    }
+
+    public Task<SendMessageResult> SendButtonsResponseAsync(
+        Jid toJid,
+        string selectedButtonId,
+        string selectedDisplayText,
+        MessageKey? quotedKey = null,
+        Message? quotedMessage = null,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        ContextInfo? ctx = RichMessageBuilders.BuildQuoteContextInfo(quotedKey, quotedMessage);
+        Message msg = RichMessageBuilders.BuildButtonsResponseMessage(selectedButtonId, selectedDisplayText, ctx);
+        return SendRichMessageAsync(toJid, msg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
+    }
+
+    public Task<SendMessageResult> SendTemplateButtonReplyAsync(
+        Jid toJid,
+        string selectedId,
+        string selectedDisplayText,
+        uint selectedIndex = 0,
+        uint? selectedCarouselCardIndex = null,
+        MessageKey? quotedKey = null,
+        Message? quotedMessage = null,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        ContextInfo? ctx = RichMessageBuilders.BuildQuoteContextInfo(quotedKey, quotedMessage);
+        Message msg = RichMessageBuilders.BuildTemplateButtonReplyMessage(selectedId, selectedDisplayText, selectedIndex, selectedCarouselCardIndex, ctx);
+        return SendRichMessageAsync(toJid, msg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
+    }
+
+    public Task<SendMessageResult> SendNativeFlowResponseAsync(
+        Jid toJid,
+        string flowName,
+        string paramsJson,
+        string? bodyText = null,
+        int version = 1,
+        Message.Types.InteractiveResponseMessage.Types.Body.Types.Format format = Message.Types.InteractiveResponseMessage.Types.Body.Types.Format.Default,
+        MessageKey? quotedKey = null,
+        Message? quotedMessage = null,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        ContextInfo? ctx = RichMessageBuilders.BuildQuoteContextInfo(quotedKey, quotedMessage);
+        Message msg = RichMessageBuilders.BuildInteractiveNativeFlowResponseMessage(flowName, paramsJson, bodyText, version, format, ctx);
+        return SendRichMessageAsync(toJid, msg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
+    }
+
+    public Task<SendMessageResult> SendLocationResponseAsync(
+        Jid toJid,
+        double latitude,
+        double longitude,
+        string? name = null,
+        string? address = null,
+        string? url = null,
+        MessageKey? quotedKey = null,
+        Message? quotedMessage = null,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        ContextInfo? ctx = RichMessageBuilders.BuildQuoteContextInfo(quotedKey, quotedMessage);
+        Message msg = RichMessageBuilders.BuildLocation(latitude, longitude, name, address, url, ctx);
+        return SendRichMessageAsync(toJid, msg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
+    }
+
+    public Task<SendMessageResult> SendPhoneNumberShareAsync(
+        Jid toJid,
+        string displayName,
+        string phoneNumber,
+        MessageKey? quotedKey = null,
+        Message? quotedMessage = null,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        ContextInfo? ctx = RichMessageBuilders.BuildQuoteContextInfo(quotedKey, quotedMessage);
+        string vcard = RichMessageBuilders.BuildVCard(displayName, phoneNumber);
+        Message msg = RichMessageBuilders.BuildContact(displayName, vcard, ctx);
+        return SendRichMessageAsync(toJid, msg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
+    }
+
+    public Task<SendMessageResult> SendOrderAsync(
+        Jid toJid,
+        string orderId,
+        string token,
+        Jid sellerJid,
+        int itemCount,
+        long? totalAmount1000 = null,
+        string? totalCurrencyCode = null,
+        string? orderTitle = null,
+        string? message = null,
+        Message.Types.OrderMessage.Types.OrderStatus status = Message.Types.OrderMessage.Types.OrderStatus.Inquiry,
+        byte[]? thumbnail = null,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        Message msg = RichMessageBuilders.BuildOrderMessage(
+            orderId, token, sellerJid, itemCount, totalAmount1000, totalCurrencyCode, orderTitle, message, status, thumbnail);
+        return SendRichMessageAsync(toJid, msg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
+    }
+
+    public Task<SendMessageResult> SendAddressResponseAsync(
+        Jid toJid,
+        IReadOnlyDictionary<string, string?> addressValues,
+        string? bodyText = null,
+        MessageKey? quotedKey = null,
+        Message? quotedMessage = null,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        string paramsJson = GalaxyFlowStanzas.BuildAddressResponseParamsJson(addressValues);
+        return SendNativeFlowResponseAsync(
+            toJid,
+            "address_message",
+            paramsJson,
+            bodyText,
+            version: 1,
+            format: Message.Types.InteractiveResponseMessage.Types.Body.Types.Format.Default,
+            quotedKey,
+            quotedMessage,
+            groupParticipants,
+            messageId,
+            awaitServerAck,
+            ct);
+    }
+
+    public Task<SendMessageResult> SendCallPermissionResponseAsync(
+        Jid toJid,
+        string responseStatus,
+        long? expirationTimestampSeconds = null,
+        string? bodyText = null,
+        MessageKey? quotedKey = null,
+        Message? quotedMessage = null,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        string paramsJson = GalaxyFlowStanzas.BuildCallPermissionResponseParamsJson(responseStatus, expirationTimestampSeconds);
+        return SendNativeFlowResponseAsync(
+            toJid,
+            "call_permission_request",
+            paramsJson,
+            bodyText,
+            version: 1,
+            format: Message.Types.InteractiveResponseMessage.Types.Body.Types.Format.Default,
+            quotedKey,
+            quotedMessage,
+            groupParticipants,
+            messageId,
+            awaitServerAck,
+            ct);
+    }
+
+    public async Task<SendMessageResult> SendTextWithLinkPreviewAsync(
+        Jid toJid,
+        string text,
+        MessageKey? quotedKey = null,
+        Message? quotedMessage = null,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        IReadOnlyList<Jid>? mentionedJids = null,
+        bool mentionAll = false,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(text);
+
+        LinkPreviewData? preview = _httpClient is not null
+            ? await LinkPreviewFetcher.FetchAsync(_httpClient, text, ct).ConfigureAwait(false)
+            : null;
+
+        ContextInfo? quoteCtx = RichMessageBuilders.BuildQuoteContextInfo(quotedKey, quotedMessage);
+        string[]? mentions = mentionedJids?.Select(j => j.ToNonAdString()).ToArray();
+
+        Message msg = preview is not null
+            ? RichMessageBuilders.BuildLinkPreviewText(
+                text,
+                preview.MatchedUrl,
+                preview.CanonicalUrl,
+                preview.Title,
+                preview.Description,
+                preview.ThumbnailBytes,
+                quoteCtx,
+                mentions,
+                mentionAll)
+            : (quotedKey is not null && quotedMessage is not null
+                ? RichMessageBuilders.BuildReplyText(text, quotedKey, quotedMessage, mentionedJids: mentions, mentionAll: mentionAll)
+                : (mentions is { Length: > 0 } || mentionAll
+                    ? RichMessageBuilders.BuildMentionText(text, mentions, mentionAll)
+                    : new Message { Conversation = text }));
+
+        return await SendRichMessageAsync(toJid, msg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct).ConfigureAwait(false);
+    }
+
+    public Task<SendMessageResult> SendSpoilerAsync(
+        Jid toJid,
+        Message innerMessage,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        Message wrapped = RichMessageBuilders.WrapSpoiler(innerMessage);
+        return SendRichMessageAsync(toJid, wrapped, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
+    }
+
+    public Task<SendMessageResult> SendLiveLocationAsync(
+        Jid toJid,
+        double latitude,
+        double longitude,
+        string? caption = null,
+        uint? accuracyMeters = null,
+        long sequenceNumber = 1,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        Message liveMsg = RichMessageBuilders.BuildLiveLocation(latitude, longitude, caption, accuracyMeters, sequenceNumber);
+        return SendRichMessageAsync(toJid, liveMsg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
+    }
+
+    public Task<SendMessageResult> SendScheduledCallAsync(
+        Jid toJid,
+        long scheduledTimestampMs,
+        Message.Types.ScheduledCallCreationMessage.Types.CallType callType = Message.Types.ScheduledCallCreationMessage.Types.CallType.Voice,
+        string? title = null,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        Message msg = RichMessageBuilders.BuildScheduledCallCreation(scheduledTimestampMs, callType, title);
+        return SendRichMessageAsync(toJid, msg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
+    }
+
+    public Task<SendMessageResult> EditScheduledCallAsync(
+        Jid toJid,
+        MessageKey callKey,
+        Message.Types.ScheduledCallEditMessage.Types.EditType editType = Message.Types.ScheduledCallEditMessage.Types.EditType.Cancel,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        Message msg = RichMessageBuilders.BuildScheduledCallEdit(callKey, editType);
+        return SendRichMessageAsync(toJid, msg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
+    }
+
+    public Task<SendMessageResult> SendSharePhoneNumberNotificationAsync(
+        Jid toJid,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        Message msg = RichMessageBuilders.BuildSharePhoneNumberProtocolMessage();
+        return SendRichMessageAsync(toJid, msg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
+    }
+
+    public Task<SendMessageResult> SendFlowResponseAsync(
+        Jid toJid,
+        string flowToken,
+        IReadOnlyDictionary<string, object?> formValues,
+        string? bodyText = null,
+        MessageKey? quotedKey = null,
+        Message? quotedMessage = null,
+        IReadOnlyList<Jid>? groupParticipants = null,
+        string? messageId = null,
+        bool awaitServerAck = false,
+        CancellationToken ct = default)
+    {
+        string paramsJson = GalaxyFlowStanzas.BuildFlowResponseParamsJson(flowToken, formValues);
+        return SendNativeFlowResponseAsync(
+            toJid,
+            "galaxy_message",
+            paramsJson,
+            bodyText ?? "Form submitted",
+            version: 3,
+            format: Message.Types.InteractiveResponseMessage.Types.Body.Types.Format.Extensions1,
+            quotedKey,
+            quotedMessage,
+            groupParticipants,
+            messageId,
+            awaitServerAck,
+            ct);
+    }
+
     public Task<SendMessageResult> SendRichMessageAsync(
         Jid toJid,
         Message message,
         IReadOnlyList<Jid>? groupParticipants = null,
         string? messageId = null,
         string? editAttribute = null,
+        bool awaitServerAck = false,
         CancellationToken ct = default)
     {
         if (toJid.Server == Server.Broadcast)
         {
             if (message.ReactionMessage?.Key?.Participant is { Length: > 0 } authorStr && Jid.TryParse(authorStr, out Jid authorJid))
             {
-                return SendDmAsync(authorJid.ToNonAd(), message, messageId, editAttribute: editAttribute, ct: ct);
+                return SendDmAsync(authorJid.ToNonAd(), message, messageId, editAttribute: editAttribute, awaitServerAck: awaitServerAck, ct: ct);
             }
             throw new ArgumentException("status@broadcast sends require StatusClient (or ReactionMessage targeting an author).", nameof(toJid));
         }
@@ -691,10 +1225,10 @@ public sealed class MessageSender
             {
                 throw new ArgumentException("Group participant JIDs are required when sending to a @g.us chat.", nameof(groupParticipants));
             }
-            return SendGroupMessageAsync(toJid, message, groupParticipants, messageId, editAttribute: editAttribute, ct: ct);
+            return SendGroupMessageAsync(toJid, message, groupParticipants, messageId, editAttribute: editAttribute, awaitServerAck: awaitServerAck, ct: ct);
         }
 
-        return SendDmAsync(toJid, message, messageId, editAttribute: editAttribute, ct: ct);
+        return SendDmAsync(toJid, message, messageId, editAttribute: editAttribute, awaitServerAck: awaitServerAck, ct: ct);
     }
 
     /// <summary>
@@ -859,7 +1393,7 @@ public sealed class MessageSender
             addressingMode: addressingMode,
             extraNodes: resolvedExtra);
 
-        _retryCoordinator.CacheSentMessage(new CachedSentMessage(
+        await _retryCoordinator.CacheSentMessageAsync(new CachedSentMessage(
             msgId,
             groupBare,
             stanzaType,
@@ -867,7 +1401,7 @@ public sealed class MessageSender
             hideDecryptFail,
             unpaddedBytes,
             addressingMode,
-            seenUsers));
+            seenUsers), ct).ConfigureAwait(false);
 
         var (ackReceived, errCode, errText) = await SendWithOptionalAckWaitAsync(stanza, msgId, awaitServerAck, ct).ConfigureAwait(false);
         return new SendDirectGroupResult(msgId, ackReceived, encryptedDevices.Count, targetDevices.Count, errCode, errText);
@@ -994,13 +1528,62 @@ public sealed class MessageSender
             await _backend.MsgSecrets.PutMsgSecretsAsync([(msgId, effectiveSecret, ts)], ct).ConfigureAwait(false);
         }
 
+        Message inner = MessageStanzas.UnwrapClassificationMessage(msgToSend);
+        if (inner.ProtocolMessage is { } pm)
+        {
+            if (pm.Type == Message.Types.ProtocolMessage.Types.Type.Revoke && pm.Key is { Id.Length: > 0 } revKey)
+            {
+                await _backend.History.MarkMessageRevokedAsync(chatBare, revKey.Id, ct).ConfigureAwait(false);
+                return;
+            }
+            if (pm.Type is Message.Types.ProtocolMessage.Types.Type.MessageEdit
+                or Message.Types.ProtocolMessage.Types.Type.PeerDataOperationRequestMessage
+                or Message.Types.ProtocolMessage.Types.Type.GroupMemberLabelChange
+                or Message.Types.ProtocolMessage.Types.Type.DraftMessageSync
+                or Message.Types.ProtocolMessage.Types.Type.AppStateSyncKeyRequest)
+            {
+                return;
+            }
+        }
+        if (inner.ReactionMessage is { Key.Id.Length: > 0 } rx)
+        {
+            await _backend.History.UpsertMessageReactionAsync(chatBare, rx.Key.Id, ownBare, rx.Text ?? string.Empty, ct).ConfigureAwait(false);
+            return;
+        }
+        if (inner.EncReactionMessage is not null
+            || inner.PinInChatMessage is not null
+            || inner.KeepInChatMessage is not null
+            || inner.PollUpdateMessage is not null
+            || inner.PollAddOptionMessage is not null
+            || inner.EncEventResponseMessage is not null
+            || inner.EncCommentMessage is not null
+            || inner.SecretEncryptedMessage is not null)
+        {
+            return;
+        }
+
         MessageRecord record = MessageReceiver.ToMessageRecord(msgId, chatBare, ownBare, fromMe: true, (ulong)ts, msgToSend);
         await _backend.History.SaveMessageAsync(record, ct).ConfigureAwait(false);
     }
 
+    private Jid ResolveDmTargetBare(Jid recipient)
+    {
+        Jid bare = recipient.ToNonAd();
+        if (_credentials.LidMigrated
+            && bare.IsPn()
+            && _lidPnCache.TryGetLid(bare.ToString(), out string? lidStr)
+            && !string.IsNullOrEmpty(lidStr)
+            && Jid.TryParse(lidStr, out Jid lidBare))
+        {
+            return lidBare.ToNonAd();
+        }
+        return bare;
+    }
+
     private Jid GetOwnUserForAddressing(Jid recipientBare)
     {
-        if ((recipientBare.IsLid() || recipientBare.Server == Server.Bot) && _credentials.Lid is Jid lid)
+        Jid resolved = ResolveDmTargetBare(recipientBare);
+        if ((resolved.IsLid() || resolved.Server == Server.Bot) && _credentials.Lid is Jid lid)
         {
             return lid.ToNonAd();
         }
@@ -1009,4 +1592,20 @@ public sealed class MessageSender
 
     private ushort GetOwnDeviceId() =>
         _credentials.Pn?.Device is > 0 ? _credentials.Pn.Value.Device : _credentials.Lid?.Device ?? 0;
+
+    private static void ReplaceBotMentionWithDisplayName(Message botProto, Jid botJid)
+    {
+        string token = $"@{botJid.User}";
+        const string replacement = "@Meta AI";
+        Message target = botProto.BotInvokeMessage?.Message ?? botProto;
+
+        if (target.ExtendedTextMessage is { HasText: true } ext && ext.Text.Contains(token, StringComparison.Ordinal))
+        {
+            ext.Text = ext.Text.Replace(token, replacement, StringComparison.Ordinal);
+        }
+        else if (target.HasConversation && target.Conversation.Contains(token, StringComparison.Ordinal))
+        {
+            target.Conversation = target.Conversation.Replace(token, replacement, StringComparison.Ordinal);
+        }
+    }
 }

@@ -111,8 +111,10 @@ public static class MessageStanzas
             || m.EditedMessage is not null
             || m.PinInChatMessage is not null
             || m.InteractiveMessage is not null
+            || m.TemplateMessage is not null
             || m.TemplateButtonReplyMessage is not null
             || m.RequestPhoneNumberMessage is not null
+            || m.PaymentReminderMessage is not null
             || m.EncCommentMessage is not null
             || m.MessageHistoryNotice is not null
             || m.StatusQuestionAnswerMessage is not null
@@ -149,6 +151,13 @@ public static class MessageStanzas
         if (m.LiveLocationMessage is not null) return "livelocation";
         if (m.ContactMessage is not null) return "vcard";
         if (m.ContactsArrayMessage is not null) return "contact_array";
+        if (m.ButtonsMessage is not null) return "button";
+        if (m.ButtonsResponseMessage is not null) return "buttons_response";
+        if (m.ListMessage is not null) return "list";
+        if (m.ListResponseMessage is not null) return "list_response";
+        if (m.OrderMessage is not null) return "order";
+        if (m.ProductMessage is not null) return "product";
+        if (m.InteractiveResponseMessage is not null) return "native_flow_response";
         if (m.ExtendedTextMessage is { MatchedText.Length: > 0 }) return "url";
         if (m.GroupInviteMessage is not null) return "url";
         if (m.MessageHistoryBundle is not null) return "group_history";
@@ -212,6 +221,42 @@ public static class MessageStanzas
         }
 
         return metaAttrs.Count > 0 ? new Node("meta", metaAttrs) : null;
+    }
+
+    /// <summary>
+    /// Infers a <c>&lt;biz&gt;</c> stanza child node for business interactive / native-flow messages,
+    /// matching live <c>WAWebE2EProtoUtils.getBizNativeFlowName</c> &amp; <c>createFanoutMsgStanza</c>.
+    /// </summary>
+    public static Node? InferBizNode(Message message)
+    {
+        Message m = UnwrapClassificationMessage(message);
+        if (m.InteractiveResponseMessage?.NativeFlowResponseMessage is { HasName: true } nfrm
+            && !string.IsNullOrWhiteSpace(nfrm.Name))
+        {
+            return new Node("biz", new Dictionary<string, NodeValue>(StringComparer.Ordinal)
+            {
+                ["native_flow_name"] = nfrm.Name
+            });
+        }
+        if (m.InteractiveMessage?.NativeFlowMessage is { Buttons.Count: > 0 } nfm
+            && nfm.Buttons[0].HasName && !string.IsNullOrWhiteSpace(nfm.Buttons[0].Name))
+        {
+            return new Node("biz", new[]
+            {
+                new Node("interactive", new Dictionary<string, NodeValue>(StringComparer.Ordinal)
+                {
+                    ["v"] = "1",
+                    ["type"] = "native_flow"
+                }, new[]
+                {
+                    new Node("native_flow", new Dictionary<string, NodeValue>(StringComparer.Ordinal)
+                    {
+                        ["name"] = nfm.Buttons[0].Name
+                    })
+                })
+            });
+        }
+        return null;
     }
 
     public static Node BuildEncryptedEncNode(
@@ -369,6 +414,38 @@ public static class MessageStanzas
         }
 
         return new Node("message", attrs, new NodeContent.NodesContent(children));
+    }
+
+    /// <summary>
+    /// Builds the pairwise <c>&lt;bot&gt;</c> fan-out child node placed inside a group
+    /// <c>&lt;message&gt;</c> stanza when Meta AI / an AI agent is a group member
+    /// (<c>agent_engagement_type="member"</c>) or invoked via mention (<c>"invoked"</c>).
+    /// </summary>
+    public static Node BuildBotFanoutNode(
+        Jid botDeviceJid,
+        string encType,
+        byte[] ciphertext,
+        string? agentEngagementType = "member",
+        string? mediaType = null,
+        bool isFeedback = false)
+    {
+        ArgumentNullException.ThrowIfNull(ciphertext);
+        var botAttrs = new Dictionary<string, NodeValue>(StringComparer.Ordinal);
+        if (isFeedback)
+        {
+            botAttrs["type"] = "feedback";
+        }
+        if (!string.IsNullOrEmpty(agentEngagementType))
+        {
+            botAttrs["agent_engagement_type"] = agentEngagementType;
+        }
+
+        var toNode = new Node(
+            "to",
+            new Dictionary<string, NodeValue>(StringComparer.Ordinal) { ["jid"] = botDeviceJid },
+            new[] { BuildEncryptedEncNode(encType, ciphertext, mediaType) });
+
+        return new Node("bot", botAttrs.Count > 0 ? botAttrs : null, new[] { toNode });
     }
 
     /// <summary>

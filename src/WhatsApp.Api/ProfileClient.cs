@@ -91,6 +91,7 @@ public sealed class ProfileClient
             SyncdMutation.Types.SyncdOperation.Set,
             AppStateSchemas.SettingPushName.BuildIndex(),
             value,
+            actionVersion: AppStateSchemas.SettingPushName.Version,
             ct: ct);
     }
 

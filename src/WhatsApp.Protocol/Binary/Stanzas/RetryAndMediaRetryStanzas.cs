@@ -211,7 +211,7 @@ public static class RetryAndMediaRetryStanzas
         byte[]? errIv = null;
         if (receipt.GetChild("encrypt") is { } encNode)
         {
-            errPayload = (encNode.GetChild("enc_payload")?.Content as NodeContent.BytesContent)?.Bytes;
+            errPayload = ((encNode.GetChild("enc_p") ?? encNode.GetChild("enc_payload"))?.Content as NodeContent.BytesContent)?.Bytes;
             errIv = (encNode.GetChild("enc_iv")?.Content as NodeContent.BytesContent)?.Bytes;
         }
 
@@ -237,7 +237,8 @@ public static class RetryAndMediaRetryStanzas
         byte[] encryptedPayload,
         byte[] iv12,
         Jid? participant = null,
-        Jid? ownFromJid = null)
+        Jid? ownFromJid = null,
+        Jid? toJid = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(messageId);
         var rmrAttrs = new Dictionary<string, NodeValue>(StringComparer.Ordinal)
@@ -253,7 +254,7 @@ public static class RetryAndMediaRetryStanzas
         var attrs = new Dictionary<string, NodeValue>(StringComparer.Ordinal)
         {
             ["id"] = messageId,
-            ["to"] = StanzaBuilder.ServerPn,
+            ["to"] = toJid ?? StanzaBuilder.ServerPn,
             ["type"] = "server-error"
         };
         if (ownFromJid is Jid own)
@@ -265,7 +266,7 @@ public static class RetryAndMediaRetryStanzas
         {
             new("encrypt", new Node[]
             {
-                new("enc_payload", encryptedPayload),
+                new("enc_p", encryptedPayload),
                 new("enc_iv", iv12)
             }),
             new("rmr", rmrAttrs)
@@ -281,7 +282,7 @@ public static class RetryAndMediaRetryStanzas
         }
 
         Node? encNode = notification.GetChild("encrypt");
-        byte[]? payload = (encNode?.GetChild("enc_payload")?.Content as NodeContent.BytesContent)?.Bytes;
+        byte[]? payload = ((encNode?.GetChild("enc_p") ?? encNode?.GetChild("enc_payload"))?.Content as NodeContent.BytesContent)?.Bytes;
         byte[]? iv = (encNode?.GetChild("enc_iv")?.Content as NodeContent.BytesContent)?.Bytes;
         Node? rmrNode = notification.GetChild("rmr");
         int? errCode = notification.GetChild("error") is { } errNode
@@ -289,7 +290,7 @@ public static class RetryAndMediaRetryStanzas
             ? ec
             : null;
 
-        if (payload is null || iv is null)
+        if (errCode is null && (payload is null || iv is null))
         {
             return null;
         }
@@ -300,8 +301,8 @@ public static class RetryAndMediaRetryStanzas
             TryParseAttrJid(rmrNode, "jid"),
             string.Equals(rmrNode?.GetAttr("from_me"), "true", StringComparison.OrdinalIgnoreCase),
             TryParseAttrJid(rmrNode, "participant"),
-            payload,
-            iv,
+            payload ?? Array.Empty<byte>(),
+            iv ?? Array.Empty<byte>(),
             errCode);
     }
 

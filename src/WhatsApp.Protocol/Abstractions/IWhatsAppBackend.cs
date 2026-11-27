@@ -88,7 +88,25 @@ public interface IProtocolStore
 
     ValueTask StoreTcTokenAsync(string jid, byte[] token, long timestamp, CancellationToken ct = default);
     ValueTask<byte[]?> GetTcTokenAsync(string jid, CancellationToken ct = default);
+
+    ValueTask<int> IncrementInboundRetryCountAsync(string chatJid, string messageId, CancellationToken ct = default);
+    ValueTask ClearInboundRetryCountAsync(string chatJid, string messageId, CancellationToken ct = default);
+
+    ValueTask SaveOutboundRetryAsync(OutboundRetryEntry entry, int maxEntries = 1000, CancellationToken ct = default);
+    ValueTask<OutboundRetryEntry?> GetOutboundRetryAsync(string messageId, CancellationToken ct = default);
+    ValueTask PruneExpiredOutboundRetriesAsync(long cutoffUnixSeconds, CancellationToken ct = default);
 }
+
+public sealed record OutboundRetryEntry(
+    string MessageId,
+    string ToChatJid,
+    string StanzaType,
+    string? MediaType,
+    bool HideDecryptFail,
+    byte[] UnpaddedProtobufBytes,
+    string? AddressingMode,
+    IReadOnlyList<string> AllowedParticipantUsers,
+    long CreatedAtUnixSeconds);
 
 /// <summary>
 /// Persisted message secrets contract for poll/edit/event validation.
@@ -113,6 +131,7 @@ public interface IMessageHistoryStore
     ValueTask UpsertBatchAsync(HistorySyncBatch batch, CancellationToken ct = default);
     ValueTask SaveMessageAsync(MessageRecord message, CancellationToken ct = default);
     ValueTask<IReadOnlyList<MessageRecord>> GetMessagesAsync(string chatJid, ulong? beforeTimestamp, int limit, CancellationToken ct = default);
+    ValueTask<MessageRecord?> GetMessageByIdAsync(string messageId, string? chatJid = null, CancellationToken ct = default);
     ValueTask<int> GetMessageCountAsync(string? chatJid = null, CancellationToken ct = default);
     ValueTask<ActiveMessageRange?> GetMessageRangeAsync(string chatJid, CancellationToken ct = default);
     ValueTask UpdateMessageRangeAsync(ActiveMessageRange range, CancellationToken ct = default);
@@ -120,10 +139,27 @@ public interface IMessageHistoryStore
     ValueTask<IReadOnlyList<ChatSummary>> GetChatsAsync(int limit = 50, int offset = 0, bool? archived = null, CancellationToken ct = default);
     ValueTask<IReadOnlyList<MessageRecord>> SearchMessagesAsync(string query, string? chatJid = null, int limit = 50, CancellationToken ct = default);
     ValueTask<IReadOnlyList<ContactRecord>> SearchContactsAsync(string query, int limit = 50, CancellationToken ct = default);
+    ValueTask UpsertContactAsync(ContactRecord contact, CancellationToken ct = default);
+    ValueTask RemoveContactAsync(string contactJid, CancellationToken ct = default);
+    ValueTask UpdateChatStateAsync(string chatJid, bool? pinned = null, bool? archived = null, long? muteEndTimestamp = null, bool clearMute = false, CancellationToken ct = default);
+    ValueTask UpsertGroupAsync(GroupMetadataRecord group, CancellationToken ct = default);
+    ValueTask<GroupMetadataRecord?> GetGroupAsync(string groupJid, CancellationToken ct = default);
+    ValueTask<IReadOnlyList<GroupMetadataRecord>> GetGroupsAsync(CancellationToken ct = default);
     ValueTask SaveDraftAsync(string chatJid, string? draftText, long timestampMs, CancellationToken ct = default);
     ValueTask ApplyMessageEditAsync(string chatJid, string messageId, string? newText, long editedTimestampSeconds, CancellationToken ct = default);
     ValueTask MarkMessageRevokedAsync(string chatJid, string messageId, CancellationToken ct = default);
     ValueTask UpsertMessageReactionAsync(string chatJid, string messageId, string senderJid, string emoji, CancellationToken ct = default);
+    ValueTask DeleteChatAsync(string chatJid, CancellationToken ct = default);
+    ValueTask ClearChatMessagesAsync(string chatJid, bool preserveStarred = true, CancellationToken ct = default);
+    ValueTask UpdateChatReadStateAsync(string chatJid, bool read, CancellationToken ct = default);
+    ValueTask DeleteMessageAsync(string chatJid, string messageId, CancellationToken ct = default);
+    ValueTask SetMessageStarredAsync(string chatJid, string messageId, bool starred, CancellationToken ct = default);
+    ValueTask SetFavoriteChatsAsync(IReadOnlyList<string> chatJids, CancellationToken ct = default);
+    ValueTask UpsertLabelAsync(LabelRecord label, CancellationToken ct = default);
+    ValueTask SetChatLabelAsync(string labelId, string chatJid, bool labeled, CancellationToken ct = default);
+    ValueTask ReorderLabelsAsync(IReadOnlyList<int> sortedLabelIds, CancellationToken ct = default);
+    ValueTask<IReadOnlyList<LabelRecord>> GetLabelsAsync(bool includeDeleted = false, CancellationToken ct = default);
+    ValueTask<IReadOnlyList<string>> GetLabelChatJidsAsync(string labelId, CancellationToken ct = default);
 }
 
 /// <summary>

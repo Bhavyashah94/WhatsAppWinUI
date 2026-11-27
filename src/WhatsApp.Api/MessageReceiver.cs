@@ -125,16 +125,18 @@ public sealed class MessageReceiver
                     effectiveChat = destJid.ToNonAdString();
                 }
                 fromMe = true;
-                if (dsm.Message is { } inner)
-                {
-                    message = inner;
-                }
+                message = MessageFraming.UnwrapDeviceSentMessage(message);
             }
 
             await ProcessSideEffectsAndPersistAsync(parsed, message, effectiveChat, senderDev.ToNonAdString(), fromMe, ct)
                 .ConfigureAwait(false);
 
             _retryCoordinator.ClearInboundRetry(effectiveChat, parsed.Id);
+            await _backend.Protocol.ClearInboundRetryCountAsync(chatBare, parsed.Id, ct).ConfigureAwait(false);
+            if (!string.Equals(effectiveChat, chatBare, StringComparison.OrdinalIgnoreCase))
+            {
+                await _backend.Protocol.ClearInboundRetryCountAsync(effectiveChat, parsed.Id, ct).ConfigureAwait(false);
+            }
             anySaved = true;
         }
 
@@ -306,13 +308,36 @@ public sealed class MessageReceiver
 
             case "msg":
             {
-                SignalSession existing = await _backend.Signal.GetSessionAsync(senderAddr, ct).ConfigureAwait(false)
-                    ?? throw new CryptographicException($"No Signal session established for {senderAddr}.");
-
                 WhatsApp.Protocol.Signal.SignalMessage msg = WhatsApp.Protocol.Signal.SignalMessage.Parse(enc.Ciphertext);
-                byte[] plaintext = SignalCipher.DecryptSignal(msg, existing, _credentials.IdentityKey);
-                await _backend.Signal.SaveSessionAsync(senderAddr, existing, ct).ConfigureAwait(false);
-                return plaintext;
+                SignalSession? existing = await _backend.Signal.GetSessionAsync(senderAddr, ct).ConfigureAwait(false);
+                if (existing is not null)
+                {
+                    try
+                    {
+                        byte[] plaintext = SignalCipher.DecryptSignal(msg, existing, _credentials.IdentityKey);
+                        await _backend.Signal.SaveSessionAsync(senderAddr, existing, ct).ConfigureAwait(false);
+                        return plaintext;
+                    }
+                    catch (CryptographicException ex)
+                    {
+                        byte[]? aliasPlaintext = await TryDecryptWithAliasSessionAsync(senderDev, senderAddr, msg, ct)
+                            .ConfigureAwait(false);
+                        if (aliasPlaintext is not null)
+                        {
+                            return aliasPlaintext;
+                        }
+                        throw new CryptographicException(ex.Message, ex);
+                    }
+                }
+
+                byte[]? migratedPlaintext = await TryDecryptWithAliasSessionAsync(senderDev, senderAddr, msg, ct)
+                    .ConfigureAwait(false);
+                if (migratedPlaintext is not null)
+                {
+                    return migratedPlaintext;
+                }
+
+                throw new CryptographicException($"No Signal session established for {senderAddr}.");
             }
 
             case "skmsg":
@@ -985,6 +1010,78 @@ public sealed class MessageReceiver
     private bool IsOwnBareJid(string bare) =>
         Jid.TryParse(bare, out Jid j) && IsOwnUser(j.User);
 
+    private async Task<byte[]?> TryDecryptWithAliasSessionAsync(
+        Jid senderDev,
+        string canonicalAddr,
+        WhatsApp.Protocol.Signal.SignalMessage msg,
+        CancellationToken ct)
+    {
+        foreach (string aliasAddr in BuildSignalAliasAddresses(senderDev))
+        {
+            if (string.Equals(aliasAddr, canonicalAddr, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            SignalSession? aliasSession = await _backend.Signal.GetSessionAsync(aliasAddr, ct).ConfigureAwait(false);
+            if (aliasSession is null)
+            {
+                continue;
+            }
+
+            // Clone before trying so a mismatched alias session is never mutated on failure.
+            SignalSession candidate = SignalStateCodec.DeserializeSession(SignalStateCodec.SerializeSession(aliasSession));
+            try
+            {
+                byte[] plaintext = SignalCipher.DecryptSignal(msg, candidate, _credentials.IdentityKey);
+                await _backend.Signal.SaveSessionAsync(canonicalAddr, candidate, ct).ConfigureAwait(false);
+                if (senderDev.IsLid())
+                {
+                    await _backend.Signal.DeleteSessionAsync(aliasAddr, ct).ConfigureAwait(false);
+                }
+                return plaintext;
+            }
+            catch (CryptographicException)
+            {
+                // Try next alias addressing form.
+            }
+        }
+
+        return null;
+    }
+
+    private List<string> BuildSignalAliasAddresses(Jid senderDev)
+    {
+        var list = new List<string>(2);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void AddBare(Jid bare)
+        {
+            string addr = (bare with { Device = senderDev.Device }).ToProtocolAddress();
+            if (seen.Add(addr))
+            {
+                list.Add(addr);
+            }
+        }
+
+        string bareStr = senderDev.ToNonAdString();
+        if (senderDev.IsLid() && _lidPnCache.TryGetPn(bareStr, out string? pnStr) && !string.IsNullOrEmpty(pnStr) && Jid.TryParse(pnStr, out Jid pnBare))
+        {
+            AddBare(pnBare);
+        }
+        else if (senderDev.IsPn() && _lidPnCache.TryGetLid(bareStr, out string? lidStr) && !string.IsNullOrEmpty(lidStr) && Jid.TryParse(lidStr, out Jid lidBare))
+        {
+            AddBare(lidBare);
+        }
+
+        if (IsOwnUser(senderDev.User))
+        {
+            if (_credentials.Pn is Jid ownPn) AddBare(ownPn.ToNonAd());
+            if (_credentials.Lid is Jid ownLid) AddBare(ownLid.ToNonAd());
+        }
+
+        return list;
+    }
+
     private async Task HandleDecryptFailureAsync(
         IncomingMessageStanza parsed,
         EncryptedMessagePayload failedEnc,
@@ -992,7 +1089,8 @@ public sealed class MessageReceiver
         CancellationToken ct)
     {
         string chatBare = parsed.ChatJid.ToNonAdString();
-        var (retryCount, shouldSend) = _retryCoordinator.RecordInboundDecryptFailure(chatBare, parsed.Id);
+        int retryCount = await _backend.Protocol.IncrementInboundRetryCountAsync(chatBare, parsed.Id, ct).ConfigureAwait(false);
+        bool shouldSend = retryCount <= RetryAndMediaRetryStanzas.MaxRetryCount;
         RetryReason reason = ClassifyRetryReason(ex, failedEnc.EncType);
 
         if (shouldSend)
@@ -1175,10 +1273,29 @@ public sealed class MessageReceiver
             return new MessageRecord(id, chatJid, senderJid, fromMe, timestampSeconds, MessageType.Protocol, null);
         }
 
-        string? text = ExtractReadableText(m);
+        InteractiveMessageContent? interactive = InteractiveMessageParser.Parse(m);
+        string? interactiveJson = InteractiveMessageParser.Serialize(interactive);
+        if (interactive is not null && InteractiveMessageParser.ExtractEmbeddedMediaHeader(m) is { } hdrMedia)
+        {
+            MessageRecord hdrRec = ToMessageRecord(id, chatJid, senderJid, fromMe, timestampSeconds, hdrMedia);
+            string? hdrText = InteractiveMessageParser.ExtractSummaryText(interactive) ?? hdrRec.Text;
+            return hdrRec with
+            {
+                Text = hdrText,
+                QuotedMessageId = quotedId,
+                QuotedSenderJid = quotedSender,
+                QuotedText = quotedText,
+                InteractiveJson = interactiveJson
+            };
+        }
+
+        string? text = interactive is not null
+            ? InteractiveMessageParser.ExtractSummaryText(interactive)
+            : ExtractReadableText(m);
         MessageType msgType = text is not null ? MessageType.Text : MessageType.Unknown;
         return new MessageRecord(id, chatJid, senderJid, fromMe, timestampSeconds, msgType, text,
-            QuotedMessageId: quotedId, QuotedSenderJid: quotedSender, QuotedText: quotedText);
+            QuotedMessageId: quotedId, QuotedSenderJid: quotedSender, QuotedText: quotedText,
+            InteractiveJson: interactiveJson);
     }
 
     private static ContextInfo? ExtractContextInfo(Message m)
@@ -1190,17 +1307,26 @@ public sealed class MessageReceiver
             ?? cur.AudioMessage?.ContextInfo
             ?? cur.DocumentMessage?.ContextInfo
             ?? cur.StickerMessage?.ContextInfo
+            ?? cur.LocationMessage?.ContextInfo
+            ?? cur.LiveLocationMessage?.ContextInfo
+            ?? cur.ContactMessage?.ContextInfo
+            ?? cur.ContactsArrayMessage?.ContextInfo
             ?? cur.MusicMessage?.ContextInfo
             ?? cur.NewsletterAdminInviteMessage?.ContextInfo
             ?? cur.NewsletterFollowerInviteMessageV2?.ContextInfo
             ?? cur.ProductMessage?.ContextInfo
             ?? cur.OrderMessage?.ContextInfo
-            ?? cur.RichResponseMessage?.ContextInfo;
+            ?? cur.RichResponseMessage?.ContextInfo
+            ?? InteractiveMessageParser.ExtractInteractiveContextInfo(cur);
     }
 
     private static string? ExtractReadableText(Message m)
     {
         Message u = MessageStanzas.UnwrapClassificationMessage(m);
+        if (InteractiveMessageParser.Parse(u) is { } interactive)
+        {
+            return InteractiveMessageParser.ExtractSummaryText(interactive);
+        }
         return u.HasConversation
             ? u.Conversation
             : (u.ExtendedTextMessage is { HasText: true } ext
@@ -1209,6 +1335,8 @@ public sealed class MessageReceiver
                     ?? (u.EventMessage is { HasName: true } evt ? evt.Name : null)
                     ?? (u.LocationMessage is { } loc ? (loc.HasName ? loc.Name : (loc.HasAddress ? loc.Address : $"{loc.DegreesLatitude},{loc.DegreesLongitude}")) : null)
                     ?? (u.LiveLocationMessage is { HasCaption: true } live ? live.Caption : null)
+                    ?? (u.ContactMessage is { } cm ? (cm.HasDisplayName ? $"[Contact] {cm.DisplayName}" : "[Contact]") : null)
+                    ?? (u.ContactsArrayMessage is { } cam ? (cam.HasDisplayName ? $"[Contacts] {cam.DisplayName}" : $"[Contacts ({cam.Contacts.Count})]") : null)
                     ?? (u.MusicMessage?.EmbeddedMusic is { } em ? $"{em.Author} - {em.Title}" : null)
                     ?? (u.NewsletterAdminInviteMessage is { } nai ? (nai.HasCaption ? nai.Caption : (nai.HasNewsletterName ? nai.NewsletterName : null)) : null)
                     ?? (u.NewsletterFollowerInviteMessageV2 is { } nfi ? (nfi.HasCaption ? nfi.Caption : (nfi.HasNewsletterName ? nfi.NewsletterName : null)) : null)

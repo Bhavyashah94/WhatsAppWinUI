@@ -258,6 +258,11 @@ public static class MexStanzas
         "WAWebMexFetchGroupInfoIncludBotsJobQuery",
         "28713479051667101");
 
+    // ─── Phase 9D: WhatsApp Flows (Galaxy Extensions) ─────────────────────
+    public static readonly MexDoc ExtensionsGetFlowData = new(
+        "WAWebGalaxyFlowsDrawerGetFlowDataQuery",
+        "40083220921276114");
+
     public static readonly MexDoc AiAgentAutoReplyControl = new(
         "WAWebAiAgentAutoReplyControlMutation",
         "27338647792432014");

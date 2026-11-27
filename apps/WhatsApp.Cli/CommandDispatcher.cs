@@ -1,5 +1,6 @@
 using WhatsApp.Api;
 using WhatsApp.Protocol.Abstractions;
+using WhatsApp.Protocol.Binary;
 
 namespace WhatsApp.Cli;
 
@@ -26,7 +27,8 @@ public sealed class CommandDispatcher
         IReadOnlyList<string> args;
         try
         {
-            args = CommandTokenizer.Tokenize(commandLine);
+            string cleaned = (commandLine ?? string.Empty).Trim().TrimStart('\uFEFF').Trim();
+            args = CommandTokenizer.Tokenize(cleaned);
         }
         catch (FormatException ex)
         {
@@ -40,6 +42,7 @@ public sealed class CommandDispatcher
         }
 
         string cmd = args[0].ToLowerInvariant();
+        var ctx = new CliCommandContext(_runtime, _out, _err);
         try
         {
             return cmd switch
@@ -51,8 +54,49 @@ public sealed class CommandDispatcher
                 "disconnect" => await HandleDisconnectAsync().ConfigureAwait(false),
                 "reconnect" => await HandleReconnectAsync(args, ct).ConfigureAwait(false),
                 "wait-sync" => await HandleWaitSyncAsync(args, ct).ConfigureAwait(false),
+                "sleep" or "wait" => await HandleSleepAsync(args, ct).ConfigureAwait(false),
                 "events" => await HandleEventsAsync(args).ConfigureAwait(false),
                 "reset-pairing" => await HandleResetPairingAsync(args, ct).ConfigureAwait(false),
+                "unlink" => await HandleUnlinkAsync(args, ct).ConfigureAwait(false),
+                "chats" => await HistoryAndMediaHandlers.HandleChatsAsync(ctx, args, ct).ConfigureAwait(false),
+                "history" => await HistoryAndMediaHandlers.HandleHistoryAsync(ctx, args, ct).ConfigureAwait(false),
+                "search" => await HistoryAndMediaHandlers.HandleSearchAsync(ctx, args, ct).ConfigureAwait(false),
+                "pdo" => await HistoryAndMediaHandlers.HandlePdoAsync(ctx, args, ct).ConfigureAwait(false),
+                "media" => await HistoryAndMediaHandlers.HandleMediaAsync(ctx, args, ct).ConfigureAwait(false),
+                "send" => await MessagingAndPresenceHandlers.HandleSendAsync(ctx, args, ct).ConfigureAwait(false),
+                "reply" => await MessagingAndPresenceHandlers.HandleReplyAsync(ctx, args, ct).ConfigureAwait(false),
+                "edit" => await MessagingAndPresenceHandlers.HandleEditAsync(ctx, args, ct).ConfigureAwait(false),
+                "revoke" => await MessagingAndPresenceHandlers.HandleRevokeAsync(ctx, args, ct).ConfigureAwait(false),
+                "react" => await MessagingAndPresenceHandlers.HandleReactAsync(ctx, args, ct).ConfigureAwait(false),
+                "pin" => await MessagingAndPresenceHandlers.HandlePinOrKeepAsync(ctx, args, isPin: true, ct).ConfigureAwait(false),
+                "keep" => await MessagingAndPresenceHandlers.HandlePinOrKeepAsync(ctx, args, isPin: false, ct).ConfigureAwait(false),
+                "poll" => await MessagingAndPresenceHandlers.HandlePollAsync(ctx, args, ct).ConfigureAwait(false),
+                "event" => await MessagingAndPresenceHandlers.HandleEventAsync(ctx, args, ct).ConfigureAwait(false),
+                "comment" => await MessagingAndPresenceHandlers.HandleCommentAsync(ctx, args, ct).ConfigureAwait(false),
+                "presence" => await MessagingAndPresenceHandlers.HandlePresenceAsync(ctx, args, ct).ConfigureAwait(false),
+                "typing" => await MessagingAndPresenceHandlers.HandleTypingAsync(ctx, args, ct).ConfigureAwait(false),
+                "read" => await MessagingAndPresenceHandlers.HandleReadAsync(ctx, args, ct).ConfigureAwait(false),
+                "usync" => await GroupAndContactHandlers.HandleUsyncAsync(ctx, args, ct).ConfigureAwait(false),
+                "contacts" => await GroupAndContactHandlers.HandleContactsAsync(ctx, args, ct).ConfigureAwait(false),
+                "avatar" => await GroupAndContactHandlers.HandleAvatarAsync(ctx, args, ct).ConfigureAwait(false),
+                "group" => await GroupAndContactHandlers.HandleGroupAsync(ctx, args, ct).ConfigureAwait(false),
+                "chat" => await GroupAndContactHandlers.HandleChatActionAsync(ctx, args, ct).ConfigureAwait(false),
+                "syncd" => await GroupAndContactHandlers.HandleSyncdAsync(ctx, args, ct).ConfigureAwait(false),
+                "bot" => await MessagingAndPresenceHandlers.HandleBotAsync(ctx, args, ct).ConfigureAwait(false),
+                "interact" => await MessagingAndPresenceHandlers.HandleInteractAsync(ctx, args, ct).ConfigureAwait(false),
+                "privacy" => await AccountAndSyncdHandlers.HandlePrivacyAsync(ctx, args, ct).ConfigureAwait(false),
+                "profile" => await AccountAndSyncdHandlers.HandleProfileAsync(ctx, args, ct).ConfigureAwait(false),
+                "block" => await AccountAndSyncdHandlers.HandleBlockAsync(ctx, args, ct).ConfigureAwait(false),
+                "label" => await AccountAndSyncdHandlers.HandleLabelAsync(ctx, args, ct).ConfigureAwait(false),
+                "quickreply" => await AccountAndSyncdHandlers.HandleQuickReplyAsync(ctx, args, ct).ConfigureAwait(false),
+                "safety" => await AccountAndSyncdHandlers.HandleSafetyAsync(ctx, args, ct).ConfigureAwait(false),
+                "draft" => await AccountAndSyncdHandlers.HandleDraftAsync(ctx, args, ct).ConfigureAwait(false),
+                "community" => await SocialAndBusinessHandlers.HandleCommunityAsync(ctx, args, ct).ConfigureAwait(false),
+                "newsletter" => await SocialAndBusinessHandlers.HandleNewsletterAsync(ctx, args, ct).ConfigureAwait(false),
+                "status-post" => await SocialAndBusinessHandlers.HandleStatusPostAsync(ctx, args, ct).ConfigureAwait(false),
+                "broadcast" => await SocialAndBusinessHandlers.HandleBroadcastAsync(ctx, args, ct).ConfigureAwait(false),
+                "business" => await SocialAndBusinessHandlers.HandleBusinessAsync(ctx, args, ct).ConfigureAwait(false),
+                "call" => await CallHandlers.HandleCallAsync(ctx, args, ct).ConfigureAwait(false),
                 "quit" or "exit" => new CommandResult(0, ShouldExit: true),
                 _ => await UnknownCommandAsync(cmd).ConfigureAwait(false),
             };
@@ -72,21 +116,51 @@ public sealed class CommandDispatcher
     private async Task<CommandResult> PrintHelpAsync()
     {
         await _out.WriteLineAsync("""
-            WhatsApp.Cli — Headless Verification Harness (Phase 11A)
-            Commands:
+            WhatsApp.Cli — Headless Verification Harness (Phase 11A + 11B)
+            Session & Pairing:
               help                              Show this command list
               status                            Inspect device pairing, DB, generation, and Syncd/History counts
               pair qr [--timeout-sec 120] [--wait-sync-sec 0] [--qr-png <path>]
-                                                Connect, render scannable terminal QR, and await linking + Connected
               pair phone <e164> [--timeout-sec 180] [--wait-sync-sec 0]
-                                                Link via 8-char phone-number code and await linking + Connected
-              connect [--wait-sync-sec 15]      Start session and wait for ConnectedEvent (plus offline sync if paired)
-              disconnect                        Cleanly stop active session
-              reconnect [--wait-sync-sec 15]    Stop & cold-restart Noise IK session from persisted SQLite store
-              wait-sync [--timeout-sec 20]      Wait for OfflineSyncCompleted / HistorySync / AppState event
-              events [count]                    Print recent buffered runtime events (default 20)
-              reset-pairing --confirm           Wipe persisted pairing credentials from local SQLite store
+              connect [--wait-sync-sec 15]      Start session and wait for ConnectedEvent
+              disconnect | reconnect [--wait-sync-sec 15] | wait-sync [--timeout-sec 20]
+              sleep <seconds>                   Keep the session active for N seconds to receive live/retry stanzas
+              events [count]                    Print recent buffered runtime events
+              reset-pairing --confirm [--remote] Wipe persisted pairing credentials (and optionally unlink server-side)
+              unlink --confirm                  Send server <remove-companion-device> for this device and wipe DB
               quit | exit                       Shut down cleanly
+
+            History, Search, PDO & Media:
+              chats list [limit] [--archived|--active] [--offset N]
+              history <jid> [limit] [--before-ts <unixSec>]
+              search <query...> [--chat <jid>] [--limit 25]
+              pdo <chatJid> [count] | pdo placeholder <chatJid> <msgId>
+              media download <msgId> <outFile> | media reupload <msgId>
+              send media <image|video|audio|ptt|document|sticker> <jid> <file> [caption...] [--gif]
+              send contact <jid> <phone> <displayName...>
+
+            Messaging, Rich Features & Presence:
+              send text <jid> <text...> [--mention ...] [--all] [--preview] [--spoiler] | reply <jid> <msgId> <text...> [--preview]
+              send live-location <jid> <lat> <lng> [caption...] | send scheduled-call <jid> <unixMs> [title...]
+              edit <jid> <msgId> <newText...> | revoke <jid> <msgId> [--admin] | draft <set|clear> <jid> [text...]
+              react <jid> <msgId> <emoji|remove> [--encrypted] | pin <jid> <msgId> <true|false> | keep <jid> <msgId> <true|false>
+              poll create <jid> <question> --opt <a> --opt <b> [--multi] | poll vote <jid> <msgId> --opt <a>
+              interact <list|select|button|location|phone|address|callperm|flow> <jid> <msgId> [args...]
+              event create <jid> <name> --start <unixSec|iso> [--end <ts>] [--desc <text>] [--loc <name>]
+              event rsvp <jid> <msgId> <going|not_going|maybe> [--creator <jid>] | comment <groupJid> <parentMsgId> <text...>
+              presence <available|unavailable> | presence sub <jid> | typing <jid> <composing|recording|paused> | read <jid> <msgId>
+
+            Contacts, Groups, Account, Syncd, Social, Business & Calling:
+              contacts <search [query]|save <phone> <name...>|delete <phone>> | usync <phoneOrJid>... | avatar <jid>
+              privacy <get|set <cat> <val>|blacklist ...|default-disappearing <sec>> | profile <pushname|about|clear-about>
+              block <list|add|remove|check> | label <create|delete|chat|msg|reorder> | quickreply <set|delete>
+              safety <fingerprint|remove-device|rotate-spk|resync-appstate|report> | syncd [collection...]
+              group <list|info|create|pic|settings|subject|desc|tag|invite|leave|add|remove|promote|demote> ...
+              chat <delete|clear|pin|unpin|archive|unarchive|mute|unmute|read|unread|lock|unlock|star|unstar|delete-msg|disappearing|favorites> ...
+              community <list|create|subgroups|link|unlink|join|deactivate> | broadcast <list|send>
+              newsletter <list|info|directory|recommended|create|join|leave|messages|publish|react|edit|revoke|pin|unpin|mute|subscribe>
+              status-post <text|revoke|react|group|mute> | business <profile|catalog|collections|order|send-order>
+              call <dial|reject|end|mute|loopback-tone|group-start|link-create|link-query|link-join|waiting-room|raise-hand|screen-share>
             """).ConfigureAwait(false);
         return new CommandResult(0);
     }
@@ -282,6 +356,18 @@ public sealed class CommandDispatcher
         return new CommandResult(0);
     }
 
+    private async Task<CommandResult> HandleSleepAsync(IReadOnlyList<string> args, CancellationToken ct)
+    {
+        if (args.Count < 2 || !double.TryParse(args[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double seconds) || seconds < 0)
+        {
+            await _err.WriteLineAsync("Usage: sleep <seconds>").ConfigureAwait(false);
+            return new CommandResult(1);
+        }
+
+        await Task.Delay(TimeSpan.FromSeconds(seconds), ct).ConfigureAwait(false);
+        return new CommandResult(0);
+    }
+
     private async Task<CommandResult> HandleEventsAsync(IReadOnlyList<string> args)
     {
         int count = args.Count > 1 && int.TryParse(args[1], out int n) ? n : 20;
@@ -305,9 +391,46 @@ public sealed class CommandDispatcher
             await _err.WriteLineAsync("Refusing destructive reset without --confirm.").ConfigureAwait(false);
             return new CommandResult(1);
         }
+        if (args.Contains("--remote", StringComparer.OrdinalIgnoreCase))
+        {
+            return await UnlinkCurrentDeviceAsync(ct).ConfigureAwait(false);
+        }
         await _runtime.StopAsync().ConfigureAwait(false);
         await _runtime.Backend.Device.ClearPairingAsync(ct).ConfigureAwait(false);
         await _out.WriteLineAsync("Cleared pairing credentials from local SQLite store.").ConfigureAwait(false);
+        return new CommandResult(0);
+    }
+
+    private async Task<CommandResult> HandleUnlinkAsync(IReadOnlyList<string> args, CancellationToken ct)
+    {
+        if (!args.Contains("--confirm", StringComparer.OrdinalIgnoreCase))
+        {
+            await _err.WriteLineAsync("Refusing destructive server unlink without --confirm.").ConfigureAwait(false);
+            return new CommandResult(1);
+        }
+        return await UnlinkCurrentDeviceAsync(ct).ConfigureAwait(false);
+    }
+
+    private async Task<CommandResult> UnlinkCurrentDeviceAsync(CancellationToken ct)
+    {
+        DeviceCredentials? creds = await _runtime.Backend.Device.LoadAsync(ct).ConfigureAwait(false);
+        if (creds is null || !creds.IsRegistered)
+        {
+            await _runtime.StopAsync().ConfigureAwait(false);
+            await _runtime.Backend.Device.ClearPairingAsync(ct).ConfigureAwait(false);
+            await _out.WriteLineAsync("Device not registered; cleared local pairing store.").ConfigureAwait(false);
+            return new CommandResult(0);
+        }
+
+        Jid deviceJid = creds.Lid ?? creds.Pn
+            ?? throw new InvalidOperationException("Registered device credentials lack both LID and PN JIDs.");
+
+        ConnectionOrchestrator orch = await CliCommandHelpers.EnsureOrchestratorAsync(new CliCommandContext(_runtime, _out, _err), ct).ConfigureAwait(false);
+        AccountSafetyClient safety = orch.ActiveAccountSafety ?? throw new InvalidOperationException("AccountSafetyClient is not active.");
+        await safety.RemoveCompanionDeviceAsync(deviceJid, reason: "user_initiated", ct).ConfigureAwait(false);
+        await _runtime.StopAsync().ConfigureAwait(false);
+        await _runtime.Backend.Device.ClearPairingAsync(ct).ConfigureAwait(false);
+        await _out.WriteLineAsync($"Unlinked device {deviceJid} from WhatsApp server and cleared local SQLite pairing store.").ConfigureAwait(false);
         return new CommandResult(0);
     }
 

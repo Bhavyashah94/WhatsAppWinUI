@@ -204,12 +204,19 @@ public sealed class StatusClient
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(syncd);
-        byte[] idxJson = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new[] { "setting_user_status_mute", userJid.ToNonAdString() }));
+        byte[] idxJson = AppStateSchemas.UserStatusMute.BuildIndex(userJid.ToNonAdString());
         var val = new SyncActionValue
         {
+            Timestamp = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds(),
             UserStatusMuteAction = new SyncActionValue.Types.UserStatusMuteAction { Muted = muted }
         };
-        await syncd.SendMutationAsync(AppStateCollections.Regular, SyncdMutation.Types.SyncdOperation.Set, idxJson, val, ct: ct).ConfigureAwait(false);
+        await syncd.SendMutationAsync(
+            AppStateSchemas.UserStatusMute.Collection,
+            SyncdMutation.Types.SyncdOperation.Set,
+            idxJson,
+            val,
+            actionVersion: AppStateSchemas.UserStatusMute.Version,
+            ct: ct).ConfigureAwait(false);
         ApplySyncedUserMute(userJid.ToNonAdString(), muted);
     }
 
@@ -346,7 +353,7 @@ public sealed class StatusClient
             deviceIdentityBytes: anyPkmsg ? _credentials.AccountIdentityBytes : null);
 
         var allowedUsers = audience.Select(u => u.ToString()).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        _retryCoordinator.CacheSentMessage(new CachedSentMessage(
+        await _retryCoordinator.CacheSentMessageAsync(new CachedSentMessage(
             msgId,
             StatusStanzas.StatusBroadcastJid,
             MessageStanzas.ClassifyStanzaType(message),
@@ -354,7 +361,7 @@ public sealed class StatusClient
             MessageStanzas.ShouldHideDecryptFail(message),
             unpaddedBytes,
             opts.AddressingMode,
-            allowedUsers));
+            allowedUsers), ct).ConfigureAwait(false);
 
         await _socket.SendNodeAsync(stanza, ct).ConfigureAwait(false);
 

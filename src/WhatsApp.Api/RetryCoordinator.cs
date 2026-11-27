@@ -36,6 +36,7 @@ public sealed class RetryCoordinator
     private readonly DeviceCredentials _credentials;
     private readonly Func<WhatsAppEvent, ValueTask> _emitEvent;
     private readonly int _maxCachedMessages;
+    private readonly TimeProvider _timeProvider;
 
     private readonly object _cacheGate = new();
     private readonly Dictionary<string, LinkedListNode<(string Id, CachedSentMessage Entry)>> _outboundMap = new(StringComparer.Ordinal);
@@ -50,7 +51,8 @@ public sealed class RetryCoordinator
         ILidPnCache lidPnCache,
         DeviceCredentials credentials,
         Func<WhatsAppEvent, ValueTask> emitEvent,
-        int maxCachedMessages = DefaultMaxCachedMessages)
+        int maxCachedMessages = DefaultMaxCachedMessages,
+        TimeProvider? timeProvider = null)
     {
         _socket = socket ?? throw new ArgumentNullException(nameof(socket));
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
@@ -59,9 +61,22 @@ public sealed class RetryCoordinator
         _credentials = credentials ?? throw new ArgumentNullException(nameof(credentials));
         _emitEvent = emitEvent ?? throw new ArgumentNullException(nameof(emitEvent));
         _maxCachedMessages = Math.Max(16, maxCachedMessages);
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public void CacheSentMessage(CachedSentMessage entry)
+    {
+        CacheSentMessageInMemory(entry);
+        _ = PersistOutboundRetryAsync(entry, CancellationToken.None);
+    }
+
+    public Task CacheSentMessageAsync(CachedSentMessage entry, CancellationToken ct = default)
+    {
+        CacheSentMessageInMemory(entry);
+        return PersistOutboundRetryAsync(entry, ct);
+    }
+
+    private void CacheSentMessageInMemory(CachedSentMessage entry)
     {
         ArgumentNullException.ThrowIfNull(entry);
         lock (_cacheGate)
@@ -85,6 +100,21 @@ public sealed class RetryCoordinator
         }
     }
 
+    private async Task PersistOutboundRetryAsync(CachedSentMessage entry, CancellationToken ct)
+    {
+        var record = new OutboundRetryEntry(
+            entry.MessageId,
+            entry.ToChatJid.ToNonAdString(),
+            entry.StanzaType,
+            entry.MediaType,
+            entry.HideDecryptFail,
+            entry.UnpaddedProtobufBytes,
+            entry.AddressingMode,
+            entry.AllowedParticipantUsers.ToArray(),
+            _timeProvider.GetUtcNow().ToUnixTimeSeconds());
+        await _backend.Protocol.SaveOutboundRetryAsync(record, Math.Max(1000, _maxCachedMessages), ct).ConfigureAwait(false);
+    }
+
     public bool TryGetCachedSentMessage(string messageId, out CachedSentMessage? entry)
     {
         lock (_cacheGate)
@@ -98,6 +128,32 @@ public sealed class RetryCoordinator
 
         entry = null;
         return false;
+    }
+
+    public async Task<CachedSentMessage?> GetOrLoadCachedSentMessageAsync(string messageId, CancellationToken ct = default)
+    {
+        if (TryGetCachedSentMessage(messageId, out CachedSentMessage? cached) && cached is not null)
+        {
+            return cached;
+        }
+
+        OutboundRetryEntry? stored = await _backend.Protocol.GetOutboundRetryAsync(messageId, ct).ConfigureAwait(false);
+        if (stored is null || !Jid.TryParse(stored.ToChatJid, out Jid toChatJid))
+        {
+            return null;
+        }
+
+        var loaded = new CachedSentMessage(
+            stored.MessageId,
+            toChatJid,
+            stored.StanzaType,
+            stored.MediaType,
+            stored.HideDecryptFail,
+            stored.UnpaddedProtobufBytes,
+            stored.AddressingMode,
+            new HashSet<string>(stored.AllowedParticipantUsers, StringComparer.OrdinalIgnoreCase));
+        CacheSentMessageInMemory(loaded);
+        return loaded;
     }
 
     /// <summary>
@@ -165,7 +221,8 @@ public sealed class RetryCoordinator
             return false;
         }
 
-        if (!TryGetCachedSentMessage(receipt.MessageId, out CachedSentMessage? cached) || cached is null)
+        CachedSentMessage? cached = await GetOrLoadCachedSentMessageAsync(receipt.MessageId, ct).ConfigureAwait(false);
+        if (cached is null)
         {
             return true;
         }
@@ -261,6 +318,23 @@ public sealed class RetryCoordinator
         Jid requesterDevice,
         CancellationToken ct)
     {
+        if (requesterDevice.IsBot())
+        {
+            Whatsapp.Message botMsg = Whatsapp.Message.Parser.ParseFrom(cached.UnpaddedProtobufBytes);
+            if (botMsg.MessageContextInfo?.MessageSecret is { Length: 32 } sec)
+            {
+                botMsg.MessageContextInfo.BotMessageSecret = Google.Protobuf.ByteString.CopyFrom(
+                    BotMessageCrypto.DeriveBaseBotKey(sec.Span));
+                botMsg.MessageContextInfo.ClearMessageSecret();
+            }
+            if (botMsg.ProtocolMessage?.Key is { } pmKey)
+            {
+                pmKey.ClearRemoteJid();
+                pmKey.ClearParticipant();
+            }
+            return MessageFraming.EncodeAndPadMessage(botMsg);
+        }
+
         if (cached.ToChatJid.IsGroup())
         {
             string groupBare = cached.ToChatJid.ToNonAdString();

@@ -77,5 +77,6 @@ public sealed class AppStateSettingsClient
             SyncdMutation.Types.SyncdOperation.Set,
             spec.BuildIndex(),
             value,
+            actionVersion: spec.Version,
             ct: ct);
 }

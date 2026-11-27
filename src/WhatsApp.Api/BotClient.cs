@@ -43,6 +43,30 @@ public sealed class BotClient
         return list;
     }
 
+    public async Task<UsyncBotProfileInfo?> GetUsyncBotProfileAsync(
+        Jid botJid,
+        string? personaId = null,
+        CancellationToken ct = default)
+    {
+        if (!botJid.IsBot())
+        {
+            throw new ArgumentException($"Expected a bot JID, got '{botJid}'.", nameof(botJid));
+        }
+
+        string iqId = _iqClient.NextRequestId();
+        string sid = $"bot.{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+        Node iq = UsyncProtocol.BuildQuery(
+            iqId,
+            sid,
+            UsyncMode.Query,
+            UsyncContext.Interactive,
+            UsyncProtocolSet.Bot,
+            [new UsyncUserSpec { Jid = botJid.ToNonAd(), PersonaId = personaId }]);
+        Node resp = await _iqClient.SendIqAsync(iq, IqClient.DefaultTimeout, ct).ConfigureAwait(false);
+        UsyncResponse parsed = UsyncProtocol.ParseResponse(resp);
+        return parsed.Users.FirstOrDefault()?.BotProfile;
+    }
+
     public async Task<IReadOnlyList<BotGqlProfile>> GetBotProfilesAsync(
         IReadOnlyList<string> personaIds,
         CancellationToken ct = default)
@@ -122,6 +146,7 @@ public sealed class BotClient
         IReadOnlyList<Jid>? groupParticipants = null,
         byte[]? messageSecret32 = null,
         string? messageId = null,
+        bool awaitServerAck = false,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(promptText);
@@ -136,19 +161,46 @@ public sealed class BotClient
             ? (_credentials.Lid ?? _credentials.Pn)?.ToNonAdString()
             : (_credentials.Pn ?? _credentials.Lid)?.ToNonAdString();
 
-        var innerPrompt = new Message { Conversation = promptText };
-        IReadOnlyList<string>? mentions = mentionedBotJid is { } mb
-            ? [mb.ToNonAdString()]
-            : (targetChatOrBotJid.IsBot() ? null : throw new ArgumentException("Group bot invocation requires mentionedBotJid.", nameof(mentionedBotJid)));
+        if (targetChatOrBotJid.IsGroup())
+        {
+            if (mentionedBotJid is not { } botJid)
+            {
+                throw new ArgumentException("Group bot invocation requires mentionedBotJid.", nameof(mentionedBotJid));
+            }
+            if (groupParticipants is null)
+            {
+                throw new ArgumentException("Group participant JIDs are required when sending to a @g.us chat.", nameof(groupParticipants));
+            }
 
-        Message invokeMsg = RichMessageBuilders.BuildBotInvokeMessage(
-            innerPrompt,
+            Jid bareBot = botJid.ToNonAd();
+            bool botIsGroupMember = groupParticipants.Any(p => p.ToNonAd() == bareBot);
+            Message msg = botIsGroupMember
+                ? RichMessageBuilders.BuildGroupBotPromptMessage(promptText, bareBot, invokerJid, personaId, messageSecret32)
+                : RichMessageBuilders.BuildBotInvokeMessage(
+                    new Message { Conversation = promptText },
+                    invokerJid,
+                    personaId,
+                    messageSecret32,
+                    [bareBot.ToString()]);
+
+            return _messageSender.SendGroupMessageAsync(
+                targetChatOrBotJid,
+                msg,
+                groupParticipants,
+                messageId,
+                awaitServerAck: awaitServerAck,
+                botFanoutTargets: botIsGroupMember ? null : [bareBot],
+                botEngagementType: botIsGroupMember ? "member" : "invoked",
+                ct: ct);
+        }
+
+        Message directMsg = RichMessageBuilders.BuildDirectBotPromptMessage(
+            promptText,
             invokerJid,
             personaId,
-            messageSecret32,
-            mentions);
+            messageSecret32);
 
-        return _messageSender.SendRichMessageAsync(targetChatOrBotJid, invokeMsg, groupParticipants, messageId, ct: ct);
+        return _messageSender.SendRichMessageAsync(targetChatOrBotJid, directMsg, groupParticipants, messageId, awaitServerAck: awaitServerAck, ct: ct);
     }
 
     public Task<SendMessageResult> SendAiPsiMetadataAsync(

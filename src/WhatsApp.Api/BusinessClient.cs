@@ -125,9 +125,22 @@ public sealed class BusinessClient
             afterCursor,
             isOwner: isOwn);
 
-        JsonElement data = isOwn
-            ? await ExecuteOwnerCatalogHttpAsync(MexStanzas.BizQueryOwnerCatalog.Id, variables, ct).ConfigureAwait(false)
-            : await ExecuteVisitorCatalogHttpAsync(MexStanzas.BizQueryCatalog.Id, variables, visitorToken, ct).ConfigureAwait(false);
+        JsonElement data;
+        if (isOwn)
+        {
+            data = await ExecuteOwnerCatalogHttpAsync(MexStanzas.BizQueryOwnerCatalog.Id, variables, ct).ConfigureAwait(false);
+        }
+        else if (!string.IsNullOrWhiteSpace(visitorToken))
+        {
+            data = await ExecuteVisitorCatalogHttpAsync(MexStanzas.BizQueryCatalog.Id, variables, visitorToken, ct).ConfigureAwait(false);
+        }
+        else
+        {
+            MexExecutionResponse mexResp = await _mexClient.ExecuteAsync(MexStanzas.BizQueryCatalog, variables, ct: ct).ConfigureAwait(false);
+            data = mexResp.Data is { ValueKind: JsonValueKind.Object } d
+                ? d
+                : throw new BusinessCatalogException("Visitor catalog MEX query returned no data.");
+        }
 
         return BusinessStanzas.ParseCatalogResponse(data);
     }
@@ -151,9 +164,22 @@ public sealed class BusinessClient
             imageHeight,
             afterCursor);
 
-        JsonElement data = isOwn
-            ? await ExecuteOwnerCatalogHttpAsync(MexStanzas.BizQueryOwnerCollections.Id, variables, ct).ConfigureAwait(false)
-            : await ExecuteVisitorCatalogHttpAsync(MexStanzas.BizQueryCollections.Id, variables, visitorToken, ct).ConfigureAwait(false);
+        JsonElement data;
+        if (isOwn)
+        {
+            data = await ExecuteOwnerCatalogHttpAsync(MexStanzas.BizQueryOwnerCollections.Id, variables, ct).ConfigureAwait(false);
+        }
+        else if (!string.IsNullOrWhiteSpace(visitorToken))
+        {
+            data = await ExecuteVisitorCatalogHttpAsync(MexStanzas.BizQueryCollections.Id, variables, visitorToken, ct).ConfigureAwait(false);
+        }
+        else
+        {
+            MexExecutionResponse mexResp = await _mexClient.ExecuteAsync(MexStanzas.BizQueryCollections, variables, ct: ct).ConfigureAwait(false);
+            data = mexResp.Data is { ValueKind: JsonValueKind.Object } d
+                ? d
+                : throw new BusinessCatalogException("Visitor collections MEX query returned no data.");
+        }
 
         return BusinessStanzas.ParseCollectionsResponse(data);
     }

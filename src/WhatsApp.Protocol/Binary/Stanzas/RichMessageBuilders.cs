@@ -20,11 +20,92 @@ public static class RichMessageBuilders
 
     public const long MaxMessageEditWindowSeconds = 20 * 60; // 1200s verified protocol edit limit
 
+    public static Message BuildMentionText(
+        string text,
+        IReadOnlyList<string>? mentionedJids = null,
+        bool mentionAll = false)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(text);
+
+        var ctx = new ContextInfo();
+        PopulateContextMentions(ctx, mentionedJids, mentionAll);
+
+        return new Message
+        {
+            ExtendedTextMessage = new Message.Types.ExtendedTextMessage
+            {
+                Text = text,
+                ContextInfo = ctx
+            }
+        };
+    }
+
+    public static Message BuildLinkPreviewText(
+        string text,
+        string matchedText,
+        string? canonicalUrl = null,
+        string? title = null,
+        string? description = null,
+        byte[]? jpegThumbnail = null,
+        ContextInfo? contextInfo = null,
+        IReadOnlyList<string>? mentionedJids = null,
+        bool mentionAll = false)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(text);
+        ArgumentException.ThrowIfNullOrWhiteSpace(matchedText);
+
+        var ext = new Message.Types.ExtendedTextMessage
+        {
+            Text = text,
+            MatchedText = string.IsNullOrWhiteSpace(canonicalUrl) ? matchedText : canonicalUrl,
+            PreviewType = jpegThumbnail is { Length: > 0 }
+                ? Message.Types.ExtendedTextMessage.Types.PreviewType.Image
+                : Message.Types.ExtendedTextMessage.Types.PreviewType.None
+        };
+        if (!string.IsNullOrWhiteSpace(title)) ext.Title = title;
+        if (!string.IsNullOrWhiteSpace(description)) ext.Description = description;
+        if (jpegThumbnail is { Length: > 0 }) ext.JpegThumbnail = ByteString.CopyFrom(jpegThumbnail);
+
+        ContextInfo? ctx = contextInfo?.Clone();
+        if (mentionedJids is { Count: > 0 } || mentionAll)
+        {
+            ctx ??= new ContextInfo();
+            PopulateContextMentions(ctx, mentionedJids, mentionAll);
+        }
+        if (ctx is not null)
+        {
+            ext.ContextInfo = ctx;
+        }
+
+        return new Message { ExtendedTextMessage = ext };
+    }
+
+    private static void PopulateContextMentions(ContextInfo ctx, IReadOnlyList<string>? mentionedJids, bool mentionAll)
+    {
+        if (mentionedJids is { Count: > 0 })
+        {
+            foreach (string jid in mentionedJids)
+            {
+                if (!string.IsNullOrWhiteSpace(jid))
+                {
+                    ctx.MentionedJid.Add(jid);
+                }
+            }
+        }
+        if (mentionAll)
+        {
+            ctx.NonJidMentions = 1;
+        }
+    }
+
     public static Message BuildReplyText(
         string text,
         MessageKey quotedKey,
         Message quotedMessage,
-        string? quotedParticipantJid = null)
+        string? quotedParticipantJid = null,
+        bool isCrossChatQuote = false,
+        IReadOnlyList<string>? mentionedJids = null,
+        bool mentionAll = false)
     {
         ArgumentException.ThrowIfNullOrEmpty(text);
         ArgumentNullException.ThrowIfNull(quotedKey);
@@ -33,9 +114,12 @@ public static class RichMessageBuilders
         var ctx = new ContextInfo
         {
             StanzaId = quotedKey.Id,
-            QuotedMessage = quotedMessage.Clone(),
-            RemoteJid = quotedKey.RemoteJid
+            QuotedMessage = quotedMessage.Clone()
         };
+        if (isCrossChatQuote && !string.IsNullOrEmpty(quotedKey.RemoteJid))
+        {
+            ctx.RemoteJid = quotedKey.RemoteJid;
+        }
         if (!string.IsNullOrEmpty(quotedParticipantJid))
         {
             ctx.Participant = quotedParticipantJid;
@@ -43,6 +127,20 @@ public static class RichMessageBuilders
         else if (quotedKey.HasParticipant && !string.IsNullOrEmpty(quotedKey.Participant))
         {
             ctx.Participant = quotedKey.Participant;
+        }
+        if (mentionedJids is { Count: > 0 })
+        {
+            foreach (string jid in mentionedJids)
+            {
+                if (!string.IsNullOrWhiteSpace(jid))
+                {
+                    ctx.MentionedJid.Add(jid);
+                }
+            }
+        }
+        if (mentionAll)
+        {
+            ctx.NonJidMentions = 1;
         }
 
         return new Message
@@ -162,10 +260,14 @@ public static class RichMessageBuilders
         return (proto, isAdminRevoke ? EditAttrAdminRevoke : EditAttrSenderRevoke);
     }
 
-    public static Message BuildPinInChat(MessageKey targetKey, bool pin, long senderTimestampMs)
+    public static Message BuildPinInChat(
+        MessageKey targetKey,
+        bool pin,
+        long senderTimestampMs,
+        uint durationSeconds = 604_800)
     {
         ArgumentNullException.ThrowIfNull(targetKey);
-        return new Message
+        var msg = new Message
         {
             PinInChatMessage = new Message.Types.PinInChatMessage
             {
@@ -176,6 +278,15 @@ public static class RichMessageBuilders
                 SenderTimestampMs = senderTimestampMs
             }
         };
+        if (pin && durationSeconds > 0)
+        {
+            msg.MessageContextInfo = new MessageContextInfo
+            {
+                MessageAddOnDurationInSecs = durationSeconds,
+                MessageAddOnExpiryType = MessageContextInfo.Types.MessageAddonExpiryType.Static
+            };
+        }
+        return msg;
     }
 
     public static Message BuildKeepInChat(MessageKey targetKey, bool keep, long timestampMs)
@@ -403,7 +514,7 @@ public static class RichMessageBuilders
         };
     }
 
-    public static Message BuildLocation(double latitude, double longitude, string? name = null, string? address = null, string? url = null)
+    public static Message BuildLocation(double latitude, double longitude, string? name = null, string? address = null, string? url = null, ContextInfo? contextInfo = null)
     {
         var loc = new Message.Types.LocationMessage
         {
@@ -413,6 +524,7 @@ public static class RichMessageBuilders
         if (!string.IsNullOrEmpty(name)) loc.Name = name;
         if (!string.IsNullOrEmpty(address)) loc.Address = address;
         if (!string.IsNullOrEmpty(url)) loc.Url = url;
+        if (contextInfo is not null) loc.ContextInfo = contextInfo.Clone();
         return new Message { LocationMessage = loc };
     }
 
@@ -428,6 +540,47 @@ public static class RichMessageBuilders
         if (accuracyMeters is uint acc) live.AccuracyInMeters = acc;
         return new Message { LiveLocationMessage = live };
     }
+
+    public static string BuildVCard(string displayName, string phoneDigits, string? organization = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(displayName);
+        ArgumentException.ThrowIfNullOrEmpty(phoneDigits);
+        string digits = new(phoneDigits.Where(char.IsDigit).ToArray());
+        string formattedTel = digits.Length > 0 ? $"+{digits}" : phoneDigits;
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("BEGIN:VCARD");
+        sb.AppendLine("VERSION:3.0");
+        sb.Append("FN:").AppendLine(displayName);
+        if (!string.IsNullOrWhiteSpace(organization))
+        {
+            sb.Append("ORG:").AppendLine(organization);
+        }
+        sb.Append("TEL;type=CELL;type=VOICE;waid=").Append(digits).Append(':').AppendLine(formattedTel);
+        sb.Append("END:VCARD");
+        return sb.ToString();
+    }
+
+    public static Message BuildContact(string displayName, string vcard, ContextInfo? contextInfo = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(displayName);
+        ArgumentException.ThrowIfNullOrEmpty(vcard);
+        var cm = new Message.Types.ContactMessage
+        {
+            DisplayName = displayName,
+            Vcard = vcard
+        };
+        if (contextInfo is not null) cm.ContextInfo = contextInfo.Clone();
+        return new Message { ContactMessage = cm };
+    }
+
+    public static Message BuildSharePhoneNumberProtocolMessage() =>
+        new()
+        {
+            ProtocolMessage = new Message.Types.ProtocolMessage
+            {
+                Type = Message.Types.ProtocolMessage.Types.Type.SharePhoneNumber
+            }
+        };
 
     public static Message BuildAlbum(uint expectedImageCount, uint expectedVideoCount) =>
         new()
@@ -753,6 +906,34 @@ public static class RichMessageBuilders
             : null;
 
     /// <summary>
+    /// Builds a direct 1:1 bot prompt (<c>Conversation</c> + <c>MessageSecret</c> + <see cref="BotMetadata"/>)
+    /// matching WA Web 1:1 <c>@bot</c> chats (<c>agent_engagement_type="direct_chat"</c>).
+    /// </summary>
+    public static Message BuildDirectBotPromptMessage(
+        string promptText,
+        string? invokerJid = null,
+        string? personaId = null,
+        byte[]? messageSecret32 = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(promptText);
+        byte[] secret = messageSecret32 is { Length: 32 } ? messageSecret32 : RandomNumberGenerator.GetBytes(32);
+
+        var botMeta = new BotMetadata();
+        if (!string.IsNullOrEmpty(invokerJid)) botMeta.InvokerJid = invokerJid;
+        if (!string.IsNullOrEmpty(personaId)) botMeta.PersonaId = personaId;
+
+        return new Message
+        {
+            Conversation = promptText,
+            MessageContextInfo = new MessageContextInfo
+            {
+                MessageSecret = ByteString.CopyFrom(secret),
+                BotMetadata = botMeta
+            }
+        };
+    }
+
+    /// <summary>
     /// Wraps a prompt or message in <c>Message.BotInvokeMessage</c> and attaches a 32-byte
     /// <c>MessageContextInfo.MessageSecret</c> plus <see cref="BotMetadata"/> so the bot's
     /// <c>&lt;enc type="msmsg"&gt;</c> reply can be decrypted.
@@ -802,6 +983,50 @@ public static class RichMessageBuilders
         {
             BotInvokeMessage = new Message.Types.FutureProofMessage { Message = wrappedInner },
             MessageContextInfo = ctx
+        };
+    }
+
+    /// <summary>
+    /// Builds a group message targeting an AI bot that is already a member of the group
+    /// (open/agent group), preserving standard <see cref="Message.Types.ExtendedTextMessage"/>
+    /// rendering while attaching <c>MessageSecret</c> and <c>BotGroupMetadata</c>.
+    /// </summary>
+    public static Message BuildGroupBotPromptMessage(
+        string promptText,
+        Jid botJid,
+        string? invokerJid = null,
+        string? personaId = null,
+        byte[]? messageSecret32 = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(promptText);
+        byte[] secret = messageSecret32 is { Length: 32 } ? messageSecret32 : RandomNumberGenerator.GetBytes(32);
+
+        var ext = new Message.Types.ExtendedTextMessage
+        {
+            Text = promptText,
+            ContextInfo = new ContextInfo()
+        };
+        ext.ContextInfo.MentionedJid.Add(botJid.ToNonAdString());
+
+        var botMeta = new BotMetadata
+        {
+            BotGroupMetadata = new BotGroupMetadata()
+        };
+        botMeta.BotGroupMetadata.ParticipantsMetadata.Add(new BotGroupParticipantMetadata
+        {
+            BotFbid = botJid.User
+        });
+        if (!string.IsNullOrEmpty(invokerJid)) botMeta.InvokerJid = invokerJid;
+        if (!string.IsNullOrEmpty(personaId)) botMeta.PersonaId = personaId;
+
+        return new Message
+        {
+            ExtendedTextMessage = ext,
+            MessageContextInfo = new MessageContextInfo
+            {
+                MessageSecret = ByteString.CopyFrom(secret),
+                BotMetadata = botMeta
+            }
         };
     }
 
@@ -925,5 +1150,146 @@ public static class RichMessageBuilders
                 EditType = editType
             }
         };
+    }
+
+    public static ContextInfo? BuildQuoteContextInfo(
+        MessageKey? quotedKey,
+        Message? quotedMessage = null,
+        string? quotedParticipantJid = null,
+        bool isCrossChatQuote = false)
+    {
+        if (quotedKey is null || string.IsNullOrEmpty(quotedKey.Id))
+        {
+            return null;
+        }
+
+        var ctx = new ContextInfo
+        {
+            StanzaId = quotedKey.Id,
+            QuotedMessage = quotedMessage?.Clone() ?? new Message { Conversation = string.Empty }
+        };
+        if (isCrossChatQuote && !string.IsNullOrEmpty(quotedKey.RemoteJid))
+        {
+            ctx.RemoteJid = quotedKey.RemoteJid;
+        }
+        if (!string.IsNullOrEmpty(quotedParticipantJid))
+        {
+            ctx.Participant = quotedParticipantJid;
+        }
+        else if (quotedKey.HasParticipant && !string.IsNullOrEmpty(quotedKey.Participant))
+        {
+            ctx.Participant = quotedKey.Participant;
+        }
+        return ctx;
+    }
+
+    public static Message BuildListResponseMessage(
+        string selectedRowId,
+        string title,
+        string? description = null,
+        ContextInfo? contextInfo = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(selectedRowId);
+        ArgumentException.ThrowIfNullOrEmpty(title);
+
+        var msg = new Message.Types.ListResponseMessage
+        {
+            Title = title,
+            ListType = Message.Types.ListResponseMessage.Types.ListType.SingleSelect,
+            SingleSelectReply = new Message.Types.ListResponseMessage.Types.SingleSelectReply
+            {
+                SelectedRowId = selectedRowId
+            }
+        };
+        if (!string.IsNullOrEmpty(description))
+        {
+            msg.Description = description;
+        }
+        if (contextInfo is not null)
+        {
+            msg.ContextInfo = contextInfo.Clone();
+        }
+        return new Message { ListResponseMessage = msg };
+    }
+
+    public static Message BuildButtonsResponseMessage(
+        string selectedButtonId,
+        string selectedDisplayText,
+        ContextInfo? contextInfo = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(selectedButtonId);
+        ArgumentException.ThrowIfNullOrEmpty(selectedDisplayText);
+
+        var msg = new Message.Types.ButtonsResponseMessage
+        {
+            SelectedButtonId = selectedButtonId,
+            SelectedDisplayText = selectedDisplayText,
+            Type = Message.Types.ButtonsResponseMessage.Types.Type.DisplayText
+        };
+        if (contextInfo is not null)
+        {
+            msg.ContextInfo = contextInfo.Clone();
+        }
+        return new Message { ButtonsResponseMessage = msg };
+    }
+
+    public static Message BuildTemplateButtonReplyMessage(
+        string selectedId,
+        string selectedDisplayText,
+        uint selectedIndex = 0,
+        uint? selectedCarouselCardIndex = null,
+        ContextInfo? contextInfo = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(selectedId);
+        ArgumentException.ThrowIfNullOrEmpty(selectedDisplayText);
+
+        var msg = new Message.Types.TemplateButtonReplyMessage
+        {
+            SelectedId = selectedId,
+            SelectedDisplayText = selectedDisplayText,
+            SelectedIndex = selectedIndex
+        };
+        if (selectedCarouselCardIndex is uint cardIdx)
+        {
+            msg.SelectedCarouselCardIndex = cardIdx;
+        }
+        if (contextInfo is not null)
+        {
+            msg.ContextInfo = contextInfo.Clone();
+        }
+        return new Message { TemplateButtonReplyMessage = msg };
+    }
+
+    public static Message BuildInteractiveNativeFlowResponseMessage(
+        string name,
+        string paramsJson,
+        string? bodyText = null,
+        int version = 1,
+        Message.Types.InteractiveResponseMessage.Types.Body.Types.Format format = Message.Types.InteractiveResponseMessage.Types.Body.Types.Format.Default,
+        ContextInfo? contextInfo = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        ArgumentException.ThrowIfNullOrEmpty(paramsJson);
+
+        var msg = new Message.Types.InteractiveResponseMessage
+        {
+            NativeFlowResponseMessage = new Message.Types.InteractiveResponseMessage.Types.NativeFlowResponseMessage
+            {
+                Name = name,
+                ParamsJson = paramsJson,
+                Version = version
+            }
+        };
+        if (!string.IsNullOrEmpty(bodyText) || format != Message.Types.InteractiveResponseMessage.Types.Body.Types.Format.Default)
+        {
+            var body = new Message.Types.InteractiveResponseMessage.Types.Body { Format = format };
+            if (!string.IsNullOrEmpty(bodyText)) body.Text = bodyText;
+            msg.Body = body;
+        }
+        if (contextInfo is not null)
+        {
+            msg.ContextInfo = contextInfo.Clone();
+        }
+        return new Message { InteractiveResponseMessage = msg };
     }
 }

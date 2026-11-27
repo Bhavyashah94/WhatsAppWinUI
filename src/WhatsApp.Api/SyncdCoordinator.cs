@@ -7,6 +7,7 @@ using WhatsApp.Protocol.AppState;
 using WhatsApp.Protocol.Binary;
 using WhatsApp.Protocol.Binary.Stanzas;
 using WhatsApp.Protocol.Crypto;
+using WhatsApp.Protocol.HistorySync;
 
 namespace WhatsApp.Api;
 
@@ -631,6 +632,7 @@ public sealed class SyncdCoordinator : IAsyncDisposable
                 long removeTs = mutation.ActionValue?.HasTimestamp == true ? mutation.ActionValue.Timestamp : 0;
                 if (mutation.Index is ["contact", { Length: > 0 } removedJid, ..])
                 {
+                    await _backend.History.RemoveContactAsync(NormalizeContactMutationJid(removedJid, isLid: false), ct).ConfigureAwait(false);
                     await _emitEventAsync(new ContactRemovedEvent(removedJid, removeTs)).ConfigureAwait(false);
                 }
                 else if (mutation.Index is ["label_sublist", { Length: > 0 } pidStr, { Length: > 0 } sublistChatJid, ..]
@@ -689,22 +691,30 @@ public sealed class SyncdCoordinator : IAsyncDisposable
 
             if (av.PinAction is { HasPinned: true } pin && mutation.Index.Count >= 2)
             {
+                await _backend.History.UpdateChatStateAsync(mutation.Index[1], pinned: pin.Pinned, ct: ct).ConfigureAwait(false);
                 await _emitEventAsync(new PinUpdatedEvent(mutation.Index[1], pin.Pinned, ts)).ConfigureAwait(false);
             }
 
             if (av.MuteAction is { HasMuted: true } mute && mutation.Index.Count >= 2)
             {
                 long? endTs = mute.HasMuteEndTimestamp ? mute.MuteEndTimestamp : null;
+                await _backend.History.UpdateChatStateAsync(
+                    mutation.Index[1],
+                    muteEndTimestamp: mute.Muted ? (endTs ?? -1L) : null,
+                    clearMute: !mute.Muted,
+                    ct: ct).ConfigureAwait(false);
                 await _emitEventAsync(new MuteUpdatedEvent(mutation.Index[1], mute.Muted, endTs, ts)).ConfigureAwait(false);
             }
 
             if (av.ArchiveChatAction is { HasArchived: true } arc && mutation.Index.Count >= 2)
             {
+                await _backend.History.UpdateChatStateAsync(mutation.Index[1], archived: arc.Archived, ct: ct).ConfigureAwait(false);
                 await _emitEventAsync(new ArchiveUpdatedEvent(mutation.Index[1], arc.Archived, ts)).ConfigureAwait(false);
             }
 
             if (av.MarkChatAsReadAction is { HasRead: true } mcr && mutation.Index.Count >= 2)
             {
+                await _backend.History.UpdateChatReadStateAsync(mutation.Index[1], mcr.Read, ct).ConfigureAwait(false);
                 await _emitEventAsync(new MarkChatAsReadUpdatedEvent(mutation.Index[1], mcr.Read, ts)).ConfigureAwait(false);
             }
 
@@ -716,12 +726,14 @@ public sealed class SyncdCoordinator : IAsyncDisposable
             if (av.StarAction is { HasStarred: true } star && mutation.Index.Count >= 4)
             {
                 bool fromMe = string.Equals(mutation.Index[3], "1", StringComparison.Ordinal);
+                await _backend.History.SetMessageStarredAsync(mutation.Index[1], mutation.Index[2], star.Starred, ct).ConfigureAwait(false);
                 await _emitEventAsync(new StarUpdatedEvent(mutation.Index[1], mutation.Index[2], fromMe, star.Starred, ts)).ConfigureAwait(false);
             }
 
             if (av.DeleteMessageForMeAction is { } dmfm && mutation.Index.Count >= 4)
             {
                 bool fromMe = string.Equals(mutation.Index[3], "1", StringComparison.Ordinal);
+                await _backend.History.DeleteMessageAsync(mutation.Index[1], mutation.Index[2], ct).ConfigureAwait(false);
                 await _emitEventAsync(new DeleteMessageForMeUpdatedEvent(
                     mutation.Index[1],
                     mutation.Index[2],
@@ -734,12 +746,14 @@ public sealed class SyncdCoordinator : IAsyncDisposable
             {
                 bool delStarred = string.Equals(mutation.Index[2], "1", StringComparison.Ordinal);
                 bool delMedia = string.Equals(mutation.Index[3], "1", StringComparison.Ordinal);
+                await _backend.History.ClearChatMessagesAsync(mutation.Index[1], preserveStarred: !delStarred, ct).ConfigureAwait(false);
                 await _emitEventAsync(new ClearChatUpdatedEvent(mutation.Index[1], delStarred, delMedia, ts)).ConfigureAwait(false);
             }
 
             if (av.DeleteChatAction is not null && mutation.Index.Count >= 3 && mutation.Index[0] == "deleteChat")
             {
                 bool delMedia = string.Equals(mutation.Index[2], "1", StringComparison.Ordinal);
+                await _backend.History.DeleteChatAsync(mutation.Index[1], ct).ConfigureAwait(false);
                 await _emitEventAsync(new DeleteChatUpdatedEvent(mutation.Index[1], delMedia, ts)).ConfigureAwait(false);
             }
 
@@ -749,28 +763,51 @@ public sealed class SyncdCoordinator : IAsyncDisposable
                     .Where(f => f.HasId && !string.IsNullOrEmpty(f.Id))
                     .Select(f => f.Id)
                     .ToArray();
+                await _backend.History.SetFavoriteChatsAsync(ids, ct).ConfigureAwait(false);
                 await _emitEventAsync(new FavoritesUpdatedEvent(ids, ts)).ConfigureAwait(false);
             }
 
             if (av.ContactAction is { } contact && mutation.Index.Count >= 2)
             {
+                string? fullName = contact.HasFullName ? contact.FullName : null;
+                string? firstName = contact.HasFirstName ? contact.FirstName : null;
+                string? username = contact.HasUsername ? contact.Username : null;
+                string? displayName = !string.IsNullOrWhiteSpace(fullName) ? fullName : firstName;
+                string contactJid = NormalizeContactMutationJid(mutation.Index[1], isLid: false);
+                await _backend.History.UpsertContactAsync(new ContactRecord(
+                    Jid: contactJid,
+                    Name: displayName,
+                    Pushname: username,
+                    PhoneNumber: contactJid,
+                    IsAddressBookContact: !string.IsNullOrWhiteSpace(displayName)), ct).ConfigureAwait(false);
                 await _emitEventAsync(new ContactUpdatedEvent(
                     mutation.Index[1],
                     IsLid: false,
-                    contact.HasFullName ? contact.FullName : null,
-                    contact.HasFirstName ? contact.FirstName : null,
-                    contact.HasUsername ? contact.Username : null,
+                    fullName,
+                    firstName,
+                    username,
                     ts)).ConfigureAwait(false);
             }
 
             if (av.LidContactAction is { } lidContact && mutation.Index.Count >= 2)
             {
+                string? fullName = lidContact.HasFullName ? lidContact.FullName : null;
+                string? firstName = lidContact.HasFirstName ? lidContact.FirstName : null;
+                string? username = lidContact.HasUsername ? lidContact.Username : null;
+                string? displayName = !string.IsNullOrWhiteSpace(fullName) ? fullName : firstName;
+                string contactJid = NormalizeContactMutationJid(mutation.Index[1], isLid: true);
+                await _backend.History.UpsertContactAsync(new ContactRecord(
+                    Jid: contactJid,
+                    Name: displayName,
+                    Pushname: username,
+                    PhoneNumber: null,
+                    IsAddressBookContact: !string.IsNullOrWhiteSpace(displayName)), ct).ConfigureAwait(false);
                 await _emitEventAsync(new ContactUpdatedEvent(
                     mutation.Index[1],
                     IsLid: true,
-                    lidContact.HasFullName ? lidContact.FullName : null,
-                    lidContact.HasFirstName ? lidContact.FirstName : null,
-                    lidContact.HasUsername ? lidContact.Username : null,
+                    fullName,
+                    firstName,
+                    username,
                     ts)).ConfigureAwait(false);
             }
 
@@ -794,6 +831,13 @@ public sealed class SyncdCoordinator : IAsyncDisposable
 
             if (av.LabelEditAction is { } lea && mutation.Index is ["label_edit", { Length: > 0 } editLabelId, ..])
             {
+                await _backend.History.UpsertLabelAsync(new LabelRecord(
+                    editLabelId,
+                    lea.HasName ? lea.Name : string.Empty,
+                    lea.HasColor ? lea.Color : 0,
+                    lea.HasPredefinedId ? lea.PredefinedId : null,
+                    lea.HasOrderIndex ? lea.OrderIndex : null,
+                    lea.HasDeleted && lea.Deleted), ct).ConfigureAwait(false);
                 await _emitEventAsync(new LabelEditUpdatedEvent(
                     editLabelId,
                     lea.HasName ? lea.Name : null,
@@ -811,6 +855,7 @@ public sealed class SyncdCoordinator : IAsyncDisposable
                 bool labeled = laa.HasLabeled && laa.Labeled;
                 if (mutation.Index is ["label_jid", { Length: > 0 } lJidId, { Length: > 0 } lChatJid, ..])
                 {
+                    await _backend.History.SetChatLabelAsync(lJidId, lChatJid, labeled, ct).ConfigureAwait(false);
                     await _emitEventAsync(new LabelAssociationUpdatedEvent(lJidId, lChatJid, labeled, ts)).ConfigureAwait(false);
                 }
                 else if (mutation.Index is ["label_message", { Length: > 0 } lMsgLabelId, { Length: > 0 } lMsgChat, { Length: > 0 } lMsgId, ..])
@@ -823,7 +868,9 @@ public sealed class SyncdCoordinator : IAsyncDisposable
 
             if (av.LabelReorderingAction is { } lra && mutation.Index is ["label_reordering", ..])
             {
-                await _emitEventAsync(new LabelReorderingUpdatedEvent(lra.SortedLabelIds.ToArray(), ts)).ConfigureAwait(false);
+                int[] sortedIds = lra.SortedLabelIds.ToArray();
+                await _backend.History.ReorderLabelsAsync(sortedIds, ct).ConfigureAwait(false);
+                await _emitEventAsync(new LabelReorderingUpdatedEvent(sortedIds, ts)).ConfigureAwait(false);
             }
 
             if (av.LabelSublistAction is { HasSubListId: true } lsa
@@ -877,6 +924,16 @@ public sealed class SyncdCoordinator : IAsyncDisposable
             creds.PushName = latestPushName;
             await _backend.Device.SaveAsync(creds, ct).ConfigureAwait(false);
         }
+    }
+
+    private static string NormalizeContactMutationJid(string raw, bool isLid)
+    {
+        if (Jid.TryParse(raw, out Jid parsed))
+        {
+            return parsed.ToNonAdString();
+        }
+        string trimmed = raw.Trim();
+        return isLid ? $"{trimmed}@lid" : $"{trimmed}@s.whatsapp.net";
     }
 
     private static bool IsOwnCreatorJid(DeviceCredentials? creds, string rawCreator)

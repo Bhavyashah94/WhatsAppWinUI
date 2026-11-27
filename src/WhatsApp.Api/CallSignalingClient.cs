@@ -445,6 +445,7 @@ public sealed class CallSignalingClient
             SyncdMutation.Types.SyncdOperation.Set,
             index,
             value,
+            actionVersion: AppStateSchemas.CallLog.Version,
             ct: ct);
     }
 }

@@ -194,7 +194,10 @@ public static class HistorySyncDecoder
             quotedText,
             EditedTimestamp: null,
             IsRevoked: isRevoked,
-            FileLength: fileLength);
+            FileLength: fileLength,
+            InteractiveJson: webMsg.Message is not null
+                ? Binary.Stanzas.InteractiveMessageParser.Serialize(Binary.Stanzas.InteractiveMessageParser.Parse(webMsg.Message))
+                : null);
     }
 
     private static global::Whatsapp.ContextInfo? ExtractContextInfo(global::Whatsapp.Message root)
@@ -216,10 +219,7 @@ public static class HistorySyncDecoder
             ?? cur.GroupInviteMessage?.ContextInfo
             ?? cur.ProductMessage?.ContextInfo
             ?? cur.OrderMessage?.ContextInfo
-            ?? cur.ButtonsMessage?.ContextInfo
-            ?? cur.TemplateMessage?.ContextInfo
-            ?? cur.InteractiveMessage?.ContextInfo
-            ?? cur.ListMessage?.ContextInfo
+            ?? Binary.Stanzas.InteractiveMessageParser.ExtractInteractiveContextInfo(cur)
             ?? cur.NewsletterAdminInviteMessage?.ContextInfo
             ?? cur.NewsletterFollowerInviteMessageV2?.ContextInfo
             ?? cur.MusicMessage?.ContextInfo
@@ -384,22 +384,16 @@ public static class HistorySyncDecoder
             return (MessageType.Protocol, rx.HasText && rx.Text.Length > 0 ? $"[Reaction] {rx.Text}" : "[Reaction removed]", null, null, null, null, null, null, false);
         }
 
-        if (msg.ButtonsMessage is { } bm)
+        if (Binary.Stanzas.InteractiveMessageParser.Parse(msg) is { } interactive)
         {
-            string? bText = bm.HasContentText ? bm.ContentText : (bm.HasText ? bm.Text : null);
-            return (MessageType.Text, bText ?? "[Buttons message]", null, null, null, null, null, null, false);
-        }
-
-        if (msg.ListMessage is { } lm)
-        {
-            string? lText = lm.HasTitle ? lm.Title : (lm.HasDescription ? lm.Description : null);
-            return (MessageType.Text, lText ?? "[List message]", null, null, null, null, null, null, false);
-        }
-
-        if (msg.InteractiveMessage is { } im)
-        {
-            string? iText = im.Body?.HasText == true ? im.Body.Text : (im.Header?.HasTitle == true ? im.Header.Title : null);
-            return (MessageType.Text, iText ?? "[Interactive message]", null, null, null, null, null, null, false);
+            string? intText = Binary.Stanzas.InteractiveMessageParser.ExtractSummaryText(interactive);
+            if (Binary.Stanzas.InteractiveMessageParser.ExtractEmbeddedMediaHeader(msg) is { } hdrMedia)
+            {
+                var baseMedia = ClassifyMessage(hdrMedia);
+                return (baseMedia.Type, intText ?? baseMedia.Text, baseMedia.MimeType, baseMedia.DirectPath,
+                    baseMedia.MediaKey, baseMedia.FileHash, baseMedia.FileEncHash, baseMedia.FileLength, false);
+            }
+            return (MessageType.Text, intText, null, null, null, null, null, null, false);
         }
 
         if (msg.ProductMessage is { } prod)

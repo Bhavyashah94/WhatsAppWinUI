@@ -75,6 +75,25 @@ public sealed record UsyncUserSpec
     public string? PersonaId { get; init; }
 }
 
+public sealed record UsyncBotPrompt(string Emoji, string Text);
+
+public sealed record UsyncBotCommand(string Name, string Description);
+
+public sealed record UsyncBotProfileInfo(
+    string PersonaId,
+    string Name,
+    string Attributes,
+    string Description,
+    string Category,
+    bool IsDefault,
+    IReadOnlyList<UsyncBotPrompt> Prompts,
+    IReadOnlyList<UsyncBotCommand> Commands,
+    string CommandsDescription,
+    bool? IsMetaCreated = null,
+    string? CreatorName = null,
+    string? CreatorProfileUrl = null,
+    string? PosingAsProfessional = null);
+
 public sealed class UsyncUserResult
 {
     public Jid? Jid { get; init; }
@@ -94,6 +113,7 @@ public sealed class UsyncUserResult
     public byte[]? SignedKeyIndexBytes { get; init; }
     public IReadOnlyList<UsyncDeviceInfo> Devices { get; init; } = Array.Empty<UsyncDeviceInfo>();
     public UsyncDisappearingModeInfo? DisappearingMode { get; init; }
+    public UsyncBotProfileInfo? BotProfile { get; init; }
     public IReadOnlyDictionary<string, UsyncSubprotocolError> Errors { get; init; } =
         new Dictionary<string, UsyncSubprotocolError>(StringComparer.Ordinal);
 }
@@ -498,6 +518,7 @@ public static class UsyncProtocol
         byte[]? signedKeyIndexBytes = null;
         var devices = new List<UsyncDeviceInfo>();
         UsyncDisappearingModeInfo? dm = null;
+        UsyncBotProfileInfo? botProfile = null;
         var errors = new Dictionary<string, UsyncSubprotocolError>(StringComparer.Ordinal);
 
         if (userNode.GetChild("contact") is { } contactNode)
@@ -633,6 +654,18 @@ public static class UsyncProtocol
             }
         }
 
+        if (userNode.GetChild("bot") is { } botNode)
+        {
+            if (botNode.GetChild("error") is { } err)
+            {
+                errors["bot"] = ParseError(err);
+            }
+            else if (botNode.GetChild("profile") is { } profNode)
+            {
+                botProfile = ParseBotProfile(profNode);
+            }
+        }
+
         return new UsyncUserResult
         {
             Jid = jid,
@@ -652,8 +685,66 @@ public static class UsyncProtocol
             SignedKeyIndexBytes = signedKeyIndexBytes,
             Devices = devices,
             DisappearingMode = dm,
+            BotProfile = botProfile,
             Errors = errors
         };
+    }
+
+    private static UsyncBotProfileInfo ParseBotProfile(Node prof)
+    {
+        static string? ReadText(Node? n) => n?.Content switch
+        {
+            NodeContent.StringContent sc => sc.Text,
+            NodeContent.BytesContent bc => Encoding.UTF8.GetString(bc.Bytes),
+            _ => null
+        };
+
+        var prompts = new List<UsyncBotPrompt>();
+        if (prof.GetChild("prompts") is { } promptsNode)
+        {
+            foreach (Node p in promptsNode.GetChildren("prompt"))
+            {
+                prompts.Add(new UsyncBotPrompt(
+                    ReadText(p.GetChild("emoji")) ?? string.Empty,
+                    ReadText(p.GetChild("text")) ?? string.Empty));
+            }
+        }
+
+        var commands = new List<UsyncBotCommand>();
+        string cmdsDesc = string.Empty;
+        if (prof.GetChild("commands") is { } cmdsNode)
+        {
+            cmdsDesc = ReadText(cmdsNode.GetChild("description")) ?? string.Empty;
+            foreach (Node c in cmdsNode.GetChildren("command"))
+            {
+                commands.Add(new UsyncBotCommand(
+                    ReadText(c.GetChild("name")) ?? string.Empty,
+                    ReadText(c.GetChild("description")) ?? string.Empty));
+            }
+        }
+
+        bool? isMetaCreated = ReadText(prof.GetChild("is_meta_created")) is { } imc
+            ? string.Equals(imc, "true", StringComparison.OrdinalIgnoreCase)
+            : null;
+        Node? creatorNode = prof.GetChild("creator");
+        string? creatorName = ReadText(creatorNode?.GetChild("name"));
+        string? creatorUrl = ReadText(creatorNode?.GetChild("profile_url"));
+        string? posing = prof.GetChild("posing_as_professional")?.GetAttr("type");
+
+        return new UsyncBotProfileInfo(
+            prof.GetAttr("persona_id") ?? string.Empty,
+            ReadText(prof.GetChild("name")) ?? string.Empty,
+            ReadText(prof.GetChild("attributes")) ?? string.Empty,
+            ReadText(prof.GetChild("description")) ?? string.Empty,
+            ReadText(prof.GetChild("category")) ?? string.Empty,
+            string.Equals(ReadText(prof.GetChild("default")), "true", StringComparison.OrdinalIgnoreCase),
+            prompts,
+            commands,
+            cmdsDesc,
+            isMetaCreated,
+            creatorName,
+            creatorUrl,
+            posing);
     }
 
     private static UsyncSubprotocolError ParseError(Node errNode)

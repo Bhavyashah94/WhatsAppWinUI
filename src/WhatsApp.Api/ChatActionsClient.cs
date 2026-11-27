@@ -132,7 +132,7 @@ public sealed class ChatActionsClient
             Timestamp = NowMs(),
             StarAction = new SyncActionValue.Types.StarAction { Starred = starred }
         };
-        return _syncd.SendMutationAsync(AppStateSchemas.Star.Collection, SyncdMutation.Types.SyncdOperation.Set, index, value, ct: ct);
+        return SendActionAsync(AppStateSchemas.Star, index, value, ct);
     }
 
     public Task DeleteMessageForMeAsync(Jid chatJid, ChatMessageRef target, bool deleteMedia = false, CancellationToken ct = default)
@@ -151,7 +151,7 @@ public sealed class ChatActionsClient
             Timestamp = NowMs(),
             DeleteMessageForMeAction = act
         };
-        return _syncd.SendMutationAsync(AppStateSchemas.DeleteMessageForMe.Collection, SyncdMutation.Types.SyncdOperation.Set, index, value, ct: ct);
+        return SendActionAsync(AppStateSchemas.DeleteMessageForMe, index, value, ct);
     }
 
     public Task ClearChatAsync(
@@ -168,7 +168,7 @@ public sealed class ChatActionsClient
         var act = new SyncActionValue.Types.ClearChatAction();
         if (messageRange is not null) act.MessageRange = messageRange.Clone();
         var value = new SyncActionValue { Timestamp = NowMs(), ClearChatAction = act };
-        return _syncd.SendMutationAsync(AppStateSchemas.ClearChat.Collection, SyncdMutation.Types.SyncdOperation.Set, index, value, ct: ct);
+        return SendActionAsync(AppStateSchemas.ClearChat, index, value, ct);
     }
 
     public Task DeleteChatAsync(
@@ -181,7 +181,7 @@ public sealed class ChatActionsClient
         var act = new SyncActionValue.Types.DeleteChatAction();
         if (messageRange is not null) act.MessageRange = messageRange.Clone();
         var value = new SyncActionValue { Timestamp = NowMs(), DeleteChatAction = act };
-        return _syncd.SendMutationAsync(AppStateSchemas.DeleteChat.Collection, SyncdMutation.Types.SyncdOperation.Set, index, value, ct: ct);
+        return SendActionAsync(AppStateSchemas.DeleteChat, index, value, ct);
     }
 
     public Task SetFavoritesAsync(IEnumerable<Jid> favoriteChatJids, CancellationToken ct = default)
@@ -193,12 +193,7 @@ public sealed class ChatActionsClient
             act.Favorites.Add(new SyncActionValue.Types.FavoritesAction.Types.Favorite { Id = jid.ToNonAdString() });
         }
         var value = new SyncActionValue { Timestamp = NowMs(), FavoritesAction = act };
-        return _syncd.SendMutationAsync(
-            AppStateSchemas.Favorites.Collection,
-            SyncdMutation.Types.SyncdOperation.Set,
-            AppStateSchemas.Favorites.BuildIndex(),
-            value,
-            ct: ct);
+        return SendActionAsync(AppStateSchemas.Favorites, AppStateSchemas.Favorites.BuildIndex(), value, ct);
     }
 
     public Task SetFavoriteStickerAsync(
@@ -222,12 +217,7 @@ public sealed class ChatActionsClient
         if (width.HasValue) act.Width = width.Value;
 
         var value = new SyncActionValue { Timestamp = NowMs(), StickerAction = act };
-        return _syncd.SendMutationAsync(
-            AppStateSchemas.FavoriteSticker.Collection,
-            SyncdMutation.Types.SyncdOperation.Set,
-            AppStateSchemas.FavoriteSticker.BuildIndex(fileHash),
-            value,
-            ct: ct);
+        return SendActionAsync(AppStateSchemas.FavoriteSticker, AppStateSchemas.FavoriteSticker.BuildIndex(fileHash), value, ct);
     }
 
     public Task RemoveRecentStickerAsync(string fileHash, long? lastStickerSentTsSeconds = null, CancellationToken ct = default)
@@ -237,12 +227,7 @@ public sealed class ChatActionsClient
         if (lastStickerSentTsSeconds.HasValue) act.LastStickerSentTs = lastStickerSentTsSeconds.Value;
 
         var value = new SyncActionValue { Timestamp = NowMs(), RemoveRecentStickerAction = act };
-        return _syncd.SendMutationAsync(
-            AppStateSchemas.RemoveRecentSticker.Collection,
-            SyncdMutation.Types.SyncdOperation.Set,
-            AppStateSchemas.RemoveRecentSticker.BuildIndex(fileHash),
-            value,
-            ct: ct);
+        return SendActionAsync(AppStateSchemas.RemoveRecentSticker, AppStateSchemas.RemoveRecentSticker.BuildIndex(fileHash), value, ct);
     }
 
     public Task<SendMessageResult> SetDirectChatDisappearingAsync(
@@ -265,11 +250,15 @@ public sealed class ChatActionsClient
     }
 
     private Task PushChatMutationAsync(AppStateActionSpec spec, Jid chatJid, SyncActionValue value, CancellationToken ct) =>
+        SendActionAsync(spec, spec.BuildIndex(chatJid.ToNonAdString()), value, ct);
+
+    private Task SendActionAsync(AppStateActionSpec spec, byte[] index, SyncActionValue value, CancellationToken ct) =>
         _syncd.SendMutationAsync(
             spec.Collection,
             SyncdMutation.Types.SyncdOperation.Set,
-            spec.BuildIndex(chatJid.ToNonAdString()),
+            index,
             value,
+            actionVersion: spec.Version,
             ct: ct);
 
     private long NowMs() => _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();

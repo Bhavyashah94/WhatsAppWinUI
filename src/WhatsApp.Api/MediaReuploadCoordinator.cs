@@ -190,7 +190,7 @@ public sealed class MediaReuploadCoordinator
                 encPayload,
                 iv12,
                 entry.Participant,
-                ownFromJid: ownLid.ToNonAd());
+                toJid: ownLid.ToNonAd());
 
             await _socket.SendNodeAsync(receipt, CancellationToken.None).ConfigureAwait(false);
 

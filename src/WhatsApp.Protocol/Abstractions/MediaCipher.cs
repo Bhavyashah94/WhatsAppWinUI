@@ -42,6 +42,14 @@ public sealed record MediaUploadEncryptionResult(
     ulong FileLength,
     byte[]? StreamingSidecar);
 
+public sealed record MediaStreamEncryptionResult(
+    byte[] MediaKey32,
+    byte[] FileSha256,
+    byte[] FileEncSha256,
+    ulong FileLength,
+    ulong EncryptedLength,
+    byte[]? StreamingSidecar);
+
 /// <summary>
 /// Unified HKDF-SHA256 + AES-256-CBC + HMAC-SHA256 cipher for WhatsApp MMS encrypted payloads
 /// (History Sync chunks, AppState external blobs, Stickers, Images, Video, Audio, Documents),
@@ -430,5 +438,319 @@ public static class MediaCipher
         }
 
         return result;
+    }
+
+    public static async Task<MediaStreamEncryptionResult> EncryptForUploadAsync(
+        Stream plaintextInput,
+        Stream encryptedOutput,
+        WaMediaType mediaType,
+        byte[]? mediaKeyOverride = null,
+        bool? generateSidecar = null,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(plaintextInput);
+        ArgumentNullException.ThrowIfNull(encryptedOutput);
+
+        const int ioBufferSize = 65536;
+        using var plainSha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
+        if (!mediaType.IsEncrypted())
+        {
+            byte[] rawBuf = new byte[ioBufferSize];
+            ulong rawLen = 0;
+            int rawRead;
+            while ((rawRead = await plaintextInput.ReadAsync(rawBuf, ct).ConfigureAwait(false)) > 0)
+            {
+                plainSha.AppendData(rawBuf, 0, rawRead);
+                await encryptedOutput.WriteAsync(rawBuf.AsMemory(0, rawRead), ct).ConfigureAwait(false);
+                rawLen += (ulong)rawRead;
+            }
+
+            byte[] rawHash = plainSha.GetHashAndReset();
+            return new MediaStreamEncryptionResult(Array.Empty<byte>(), rawHash, rawHash, rawLen, rawLen, null);
+        }
+
+        byte[] mediaKey = mediaKeyOverride is { Length: MediaKeyLength }
+            ? mediaKeyOverride.ToArray()
+            : RandomNumberGenerator.GetBytes(MediaKeyLength);
+
+        var (iv, cipherKey, macKey) = DeriveMediaKeys(mediaKey, mediaType);
+        bool wantSidecar = generateSidecar ?? mediaType.UsesSidecar();
+        var sidecar = wantSidecar ? new StreamingSidecarAccumulator(iv, macKey) : null;
+
+        using var encSha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        using var hmac = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, macKey);
+        hmac.AppendData(iv);
+
+        using var aes = Aes.Create();
+        aes.Key = cipherKey;
+        aes.IV = iv;
+        aes.Mode = CipherMode.CBC;
+        aes.Padding = PaddingMode.PKCS7;
+        using ICryptoTransform encryptor = aes.CreateEncryptor();
+
+        byte[] plainBuf = new byte[AesBlockSize + ioBufferSize];
+        byte[] cipherBuf = new byte[AesBlockSize + ioBufferSize];
+        int pendingPlain = 0;
+        ulong plainLen = 0;
+        ulong encLen = 0;
+
+        while (true)
+        {
+            int read = await plaintextInput.ReadAsync(plainBuf.AsMemory(pendingPlain, ioBufferSize), ct).ConfigureAwait(false);
+            if (read == 0)
+            {
+                break;
+            }
+
+            plainSha.AppendData(plainBuf, pendingPlain, read);
+            plainLen += (ulong)read;
+            int total = pendingPlain + read;
+            int aligned = (total / AesBlockSize) * AesBlockSize;
+            int rem = total - aligned;
+
+            if (aligned > 0)
+            {
+                int cipherWritten = encryptor.TransformBlock(plainBuf, 0, aligned, cipherBuf, 0);
+                if (cipherWritten > 0)
+                {
+                    await encryptedOutput.WriteAsync(cipherBuf.AsMemory(0, cipherWritten), ct).ConfigureAwait(false);
+                    encSha.AppendData(cipherBuf, 0, cipherWritten);
+                    hmac.AppendData(cipherBuf, 0, cipherWritten);
+                    sidecar?.Append(cipherBuf.AsSpan(0, cipherWritten));
+                    encLen += (ulong)cipherWritten;
+                }
+            }
+
+            if (rem > 0)
+            {
+                Buffer.BlockCopy(plainBuf, aligned, plainBuf, 0, rem);
+            }
+            pendingPlain = rem;
+        }
+
+        byte[] finalCipher = encryptor.TransformFinalBlock(plainBuf, 0, pendingPlain);
+        if (finalCipher.Length > 0)
+        {
+            await encryptedOutput.WriteAsync(finalCipher, ct).ConfigureAwait(false);
+            encSha.AppendData(finalCipher);
+            hmac.AppendData(finalCipher);
+            sidecar?.Append(finalCipher);
+            encLen += (ulong)finalCipher.Length;
+        }
+
+        byte[] fullMac = hmac.GetHashAndReset();
+        byte[] mac10 = fullMac[..MediaMacSize];
+        await encryptedOutput.WriteAsync(mac10, ct).ConfigureAwait(false);
+        encSha.AppendData(mac10);
+        sidecar?.Append(mac10);
+        encLen += MediaMacSize;
+
+        return new MediaStreamEncryptionResult(
+            mediaKey,
+            plainSha.GetHashAndReset(),
+            encSha.GetHashAndReset(),
+            plainLen,
+            encLen,
+            sidecar?.Finish());
+    }
+
+    public static async Task DecryptStreamAsync(
+        Stream encryptedInput,
+        Stream plaintextOutput,
+        ReadOnlyMemory<byte> mediaKey,
+        WaMediaType mediaType,
+        ReadOnlyMemory<byte> expectedEncSha256 = default,
+        ReadOnlyMemory<byte> expectedPlainSha256 = default,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(encryptedInput);
+        ArgumentNullException.ThrowIfNull(plaintextOutput);
+
+        if (!mediaType.IsEncrypted())
+        {
+            await DecryptPlaintextStreamAsync(encryptedInput, plaintextOutput, expectedPlainSha256, ct).ConfigureAwait(false);
+            return;
+        }
+
+        const int ioBufferSize = 65536;
+        const int keepTail = MediaMacSize + AesBlockSize;
+        var (iv, cipherKey, macKey) = DeriveMediaKeys(mediaKey.Span, mediaType);
+
+        using var encSha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        using var plainSha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        using var hmac = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, macKey);
+        hmac.AppendData(iv);
+
+        using var aes = Aes.Create();
+        aes.Key = cipherKey;
+        aes.IV = iv;
+        aes.Mode = CipherMode.CBC;
+        aes.Padding = PaddingMode.PKCS7;
+        using ICryptoTransform decryptor = aes.CreateDecryptor();
+
+        byte[] inBuf = new byte[keepTail + ioBufferSize];
+        byte[] plainBuf = new byte[keepTail + ioBufferSize];
+        int buffered = 0;
+
+        while (true)
+        {
+            int read = await encryptedInput.ReadAsync(inBuf.AsMemory(buffered, ioBufferSize), ct).ConfigureAwait(false);
+            if (read == 0)
+            {
+                break;
+            }
+
+            buffered += read;
+            if (buffered > keepTail)
+            {
+                int safeCipher = ((buffered - MediaMacSize - 1) / AesBlockSize) * AesBlockSize;
+                if (safeCipher > 0)
+                {
+                    encSha.AppendData(inBuf, 0, safeCipher);
+                    hmac.AppendData(inBuf, 0, safeCipher);
+                    int plainWritten = decryptor.TransformBlock(inBuf, 0, safeCipher, plainBuf, 0);
+                    if (plainWritten > 0)
+                    {
+                        plainSha.AppendData(plainBuf, 0, plainWritten);
+                        await plaintextOutput.WriteAsync(plainBuf.AsMemory(0, plainWritten), ct).ConfigureAwait(false);
+                    }
+                    int rem = buffered - safeCipher;
+                    Buffer.BlockCopy(inBuf, safeCipher, inBuf, 0, rem);
+                    buffered = rem;
+                }
+            }
+        }
+
+        if (buffered < AesBlockSize + MediaMacSize)
+        {
+            throw new ArgumentException($"Encrypted blob is too short: {buffered} trailing bytes", nameof(encryptedInput));
+        }
+
+        int finalCipherLen = buffered - MediaMacSize;
+        if (finalCipherLen <= 0 || finalCipherLen % AesBlockSize != 0)
+        {
+            throw new CryptographicException("Ciphertext length must be a non-zero multiple of AES block size");
+        }
+
+        encSha.AppendData(inBuf, 0, buffered);
+        if (!expectedEncSha256.IsEmpty)
+        {
+            byte[] actualEncHash = encSha.GetHashAndReset();
+            if (!CryptographicOperations.FixedTimeEquals(actualEncHash, expectedEncSha256.Span))
+            {
+                throw new CryptographicException("Encrypted blob SHA-256 hash mismatch");
+            }
+        }
+
+        hmac.AppendData(inBuf, 0, finalCipherLen);
+        byte[] computedMac = hmac.GetHashAndReset();
+        if (!CryptographicOperations.FixedTimeEquals(computedMac.AsSpan(0, MediaMacSize), inBuf.AsSpan(finalCipherLen, MediaMacSize)))
+        {
+            throw new CryptographicException("Media blob HMAC verification failed");
+        }
+
+        byte[] finalPlain = decryptor.TransformFinalBlock(inBuf, 0, finalCipherLen);
+        if (finalPlain.Length > 0)
+        {
+            plainSha.AppendData(finalPlain);
+            await plaintextOutput.WriteAsync(finalPlain, ct).ConfigureAwait(false);
+        }
+
+        if (!expectedPlainSha256.IsEmpty)
+        {
+            byte[] actualPlainHash = plainSha.GetHashAndReset();
+            if (!CryptographicOperations.FixedTimeEquals(actualPlainHash, expectedPlainSha256.Span))
+            {
+                throw new CryptographicException("Decrypted plaintext SHA-256 hash mismatch");
+            }
+        }
+    }
+
+    private static async Task DecryptPlaintextStreamAsync(
+        Stream rawInput,
+        Stream plaintextOutput,
+        ReadOnlyMemory<byte> expectedPlainSha256,
+        CancellationToken ct)
+    {
+        using var plainSha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] buf = new byte[65536];
+        int read;
+        while ((read = await rawInput.ReadAsync(buf, ct).ConfigureAwait(false)) > 0)
+        {
+            plainSha.AppendData(buf, 0, read);
+            await plaintextOutput.WriteAsync(buf.AsMemory(0, read), ct).ConfigureAwait(false);
+        }
+
+        if (!expectedPlainSha256.IsEmpty)
+        {
+            byte[] actual = plainSha.GetHashAndReset();
+            if (!CryptographicOperations.FixedTimeEquals(actual, expectedPlainSha256.Span))
+            {
+                throw new CryptographicException("Plaintext media SHA-256 hash mismatch");
+            }
+        }
+    }
+
+    private sealed class StreamingSidecarAccumulator
+    {
+        private readonly byte[] _macKey;
+        private readonly byte[] _overlap = new byte[SidecarOverlapSize];
+        private readonly byte[] _chunk = new byte[SidecarChunkSize];
+        private int _chunkLen;
+        private readonly MemoryStream _out = new();
+
+        public StreamingSidecarAccumulator(ReadOnlySpan<byte> iv16, ReadOnlySpan<byte> macKey32)
+        {
+            iv16.CopyTo(_overlap);
+            _macKey = macKey32.ToArray();
+        }
+
+        public void Append(ReadOnlySpan<byte> data)
+        {
+            int pos = 0;
+            while (pos < data.Length)
+            {
+                int copy = Math.Min(SidecarChunkSize - _chunkLen, data.Length - pos);
+                data.Slice(pos, copy).CopyTo(_chunk.AsSpan(_chunkLen));
+                _chunkLen += copy;
+                pos += copy;
+
+                if (_chunkLen == SidecarChunkSize)
+                {
+                    EmitChunk(_chunkLen);
+                    _chunkLen = 0;
+                }
+            }
+        }
+
+        public byte[] Finish()
+        {
+            if (_chunkLen > 0)
+            {
+                EmitChunk(_chunkLen);
+                _chunkLen = 0;
+            }
+            return _out.ToArray();
+        }
+
+        private void EmitChunk(int len)
+        {
+            using var hmac = new HMACSHA256(_macKey);
+            hmac.TransformBlock(_overlap, 0, SidecarOverlapSize, null, 0);
+            hmac.TransformFinalBlock(_chunk, 0, len);
+            _out.Write(hmac.Hash!, 0, MediaMacSize);
+
+            if (len >= SidecarOverlapSize)
+            {
+                Buffer.BlockCopy(_chunk, len - SidecarOverlapSize, _overlap, 0, SidecarOverlapSize);
+            }
+            else
+            {
+                int shift = SidecarOverlapSize - len;
+                Buffer.BlockCopy(_overlap, len, _overlap, 0, shift);
+                Buffer.BlockCopy(_chunk, 0, _overlap, shift, len);
+            }
+        }
     }
 }

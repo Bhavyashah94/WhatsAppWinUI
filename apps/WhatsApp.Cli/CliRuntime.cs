@@ -336,10 +336,11 @@ public sealed class CliRuntime : IAsyncDisposable
             string? from = node.GetAttr("from");
             string? offline = node.GetAttr("offline");
             string? senderLid = node.GetAttr("sender_lid");
+            string? participant = node.GetAttr("participant");
             IReadOnlyList<Node> childNodes = node.Content is NodeContent.NodesContent nc ? nc.Nodes : Array.Empty<Node>();
             string children = string.Join(',', childNodes.Select(c =>
                 c.Tag == "enc" ? $"enc({c.GetAttr("type") ?? "?"})" : c.Tag));
-            string line = $"[TRACE] <{node.Tag} id={id ?? "-"} type={type ?? "-"} from={from ?? "-"} sender_lid={senderLid ?? "-"} offline={offline ?? "-"}> children=[{children}]";
+            string line = $"[TRACE] <{node.Tag} id={id ?? "-"} type={type ?? "-"} from={from ?? "-"} participant={participant ?? "-"} sender_lid={senderLid ?? "-"} offline={offline ?? "-"}> children=[{children}]";
             return new ValueTask(_out.WriteLineAsync(line));
         }
 
